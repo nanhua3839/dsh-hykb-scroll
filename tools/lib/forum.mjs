@@ -1,6 +1,11 @@
 // 板块层：把「论坛」变成可以轮询的帖子流。
 //
-// 板块帖子列表走移动版接口；翻页靠 last_id + cursor 成对回传。
+// 板块帖子列表只有一条通道（实测）：
+//   GET m.bbs.3839.com/wap.php?m=topic&ac=section_topic&v=1.0
+//       &section_id=<板块id>&last_id=<游标>&cursor=<游标>&sort=reply_time
+//       &screen_id=0&topic_list_type=all&app_version=413
+// sort 只认 reply_time（post_time / last_post 都返回 1000 排序类型错误），
+// topic_list_type 只认 all。翻页靠 last_id + cursor 成对回传，page 无效。
 import { guardedFetch } from './traffic.mjs'
 
 const MOBILE = 'https://m.bbs.3839.com'

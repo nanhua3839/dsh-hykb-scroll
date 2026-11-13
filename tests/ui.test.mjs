@@ -99,7 +99,7 @@ test('FIELDS 里每个 path 都存在于默认配置', async () => {
 test('FIELDS 的 sec 都有对应卡片、字段不重复', async () => {
   const { mod } = await loadClient()
   const secs = new Set(mod.FIELDS.map((f) => f.sec))
-  assert.deepEqual([...secs].sort(), ['ai', 'browse', 'reply', 'risk', 'who'])
+  assert.deepEqual([...secs].sort(), ['ai', 'browse', 'emoji', 'focus', 'games', 'like', 'post', 'prompt', 'reply', 'risk', 'who'])
   const seen = new Set()
   for (const f of mod.FIELDS) {
     const k = f.path.join('.')
@@ -120,17 +120,17 @@ test('整页能渲染：卡片序号连续、无 undefined / NaN 漏进文本', 
   }
   const { mod, React } = await loadClient({ 0: D, 1: status })
   React.__reset()
-  const tree = expand(React.createElement(mod.HykbWhaleSection, {}))
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
   const all = texts(tree).join(' ')
   assert.ok(all.includes('快爆小号'), '页头没渲染出来')
   for (const bad of ['undefined', 'NaN', '[object Object]']) {
     assert.ok(!all.includes(bad), '文本里漏出了 ' + bad)
   }
 
-  const cards = collect(tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className === 'hkw-card')
+  const cards = collect(tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className === 'hks-card')
   assert.ok(cards.length >= 6, '卡片数不对：' + cards.length)
-  const nos = collect(tree, (n) => n.props && n.props.className === 'hkw-no').map((n) => texts(n).join(''))
-  assert.deepEqual(nos, ['1', '2', '3', '4', '5', '6'])
+  const nos = collect(tree, (n) => n.props && n.props.className === 'hks-no').map((n) => texts(n).join(''))
+  assert.deepEqual(nos, ['1', '2', '3', '4', '5', '6', '7', '8'])
 })
 
 test('必做步骤缺一项时状态条会标红', async () => {
@@ -138,8 +138,8 @@ test('必做步骤缺一项时状态条会标红', async () => {
   const status = { ok: true, credentials: { present: false }, aiReady: false, traffic: { readHour: 0, readDay: 0, writeHour: 0, writeDay: 0 }, listen: { running: false }, browse: { enabled: false, hasSession: false } }
   const { mod, React } = await loadClient({ 0: D, 1: status })
   React.__reset()
-  const tree = expand(React.createElement(mod.HykbWhaleSection, {}))
-  const dots = collect(tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className === 'hkw-dot')
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
+  const dots = collect(tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className === 'hks-dot')
     .map((n) => n.props['data-s'])
   assert.ok(dots.includes('bad'), '未登录 / 未接 AI 时应该有红灯')
   const all = texts(tree).join(' ')
@@ -152,13 +152,13 @@ test('没有保存按钮，只留一行自动保存状态', async () => {
   const status = { ok: true, credentials: { present: true, uid: '1', nickname: 'n', hasPauth: true }, aiReady: true, traffic: { readHour: 0, readDay: 0, writeHour: 0, writeDay: 0 }, listen: { running: false }, browse: { enabled: true, hasSession: true } }
   const { mod, React } = await loadClient({ 0: D, 1: status })
   React.__reset()
-  const tree = expand(React.createElement(mod.HykbWhaleSection, {}))
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
 
   const saveBtns = collect(tree, (n) => n.type === 'button' && texts(n).join('').trim() === '保存')
   assert.equal(saveBtns.length, 0, '保存按钮应该已经删掉了')
-  assert.equal(collect(tree, (n) => n.props && n.props.className === 'hkw-bar').length, 0, '浮动保存条应该已经删掉了')
+  assert.equal(collect(tree, (n) => n.props && n.props.className === 'hks-bar').length, 0, '浮动保存条应该已经删掉了')
 
-  const rows = collect(tree, (n) => n.props && n.props.className === 'hkw-saverow')
+  const rows = collect(tree, (n) => n.props && n.props.className === 'hks-saverow')
   assert.equal(rows.length, 1, '应该有一行保存状态')
   assert.match(texts(rows[0]).join(''), /自动保存/, '空闲时要说明改完自己会存')
 })
@@ -177,7 +177,7 @@ test('点一下开关就自动 POST 配置，不用再点保存', async () => {
   try {
     const { mod, React } = await loadClient({ 0: D, 1: status })
     React.__reset()
-    const tree = expand(React.createElement(mod.HykbWhaleSection, {}))
+    const tree = expand(React.createElement(mod.HykbScrollSection, {}))
     const switches = collect(tree, (n) => n.type === 'button' && n.props.role === 'switch')
     assert.ok(switches.length > 0, '页面上应该有关关')
     switches[0].props.onClick()
@@ -189,4 +189,68 @@ test('点一下开关就自动 POST 配置，不用再点保存', async () => {
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+
+test('吃词元的卡片在标题旁的感叹号里注明，不吃的不注', async () => {
+  const D = await defaults()
+  const status = { ok: true, credentials: { present: true, uid: '1', nickname: 'n', hasPauth: true }, aiReady: true, traffic: { readHour: 0, readDay: 0, writeHour: 0, writeDay: 0 }, listen: { running: false }, browse: { enabled: true, hasSession: true } }
+  const { mod, React } = await loadClient({ 0: D, 1: status })
+  React.__reset()
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
+
+  const cards = collect(tree, (n) => n.props && n.props.className === 'hks-card')
+  const costCards = []
+  for (const c of cards) {
+    const h4 = collect(c, (n) => n.type === 'h4')
+    if (!h4.length) continue
+    const icons = collect(h4[0], (n) => n.props && n.props['aria-label'] === '此功能消耗词元。')
+    // 裸 ⓘ 会把自己的字形 "i" 算进 h4 文本，徽章文字也在里面：先剥徽章，再剥 ⓘ 字形
+    if (icons.length) costCards.push(texts(h4[0]).join('').replace(/(已接|开)$/, '').replace(/i$/, ''))
+  }
+  assert.deepEqual(costCards, ['接上 AI', '自动回帖', '刷论坛 · 日报发帖'],
+    '只有真会调模型的卡片该带这句；登录 / 她是谁 / 安全阀 / 运行记录 不调模型，不加')
+
+  // 文字只在气泡里，不占版面：卡片标题行本身不该出现这句话
+  const heads = collect(tree, (n) => n.type === 'h4').map((n) => texts(n).join(''))
+  assert.ok(heads.every((t) => !t.includes('此功能消耗词元。')), '标题行不该把这句话画出来')
+})
+
+
+test('创作/官方不回复 + 抖动 + 浏览记录 都真的画出来了', async () => {
+  const D = await defaults()
+  // 这些控件住在卡片④/⑤的正文里：卡片的约定是「开关关着就不渲染正文」，所以要先把两个开关打开
+  D.listen = { ...(D.listen || {}), enabled: true }
+  D.browse = { ...(D.browse || {}), enabled: true }
+  const status = { ok: true, credentials: { present: true, uid: '1', nickname: 'n', hasPauth: true }, aiReady: true, traffic: { readHour: 0, readDay: 0, writeHour: 0, writeDay: 0 }, listen: { running: true }, browse: { enabled: true, hasSession: true } }
+  const { mod, React } = await loadClient({ 0: D, 1: status })
+  React.__reset()
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
+  const all = texts(tree).join(' ')
+
+  assert.ok(all.includes('创作 / 官方内容不回复'), '缺少创作/官方那一段的标题')
+  for (const t of ['精华帖不接话', '官方发布不接话', '长文投稿不接话', '官方白名单', '官方黑名单']) {
+    assert.ok(all.includes(t), '缺少控件：' + t)
+  }
+  assert.ok(all.includes('扫描抖动（±秒）'), '回帖轮的抖动字段没渲染（tier-1 字段漏了？）')
+  assert.ok(all.includes('刷帖抖动（±秒）'), '刷帖轮的抖动字段没渲染')
+  assert.ok(all.includes('浏览记录'), '缺少浏览记录卡片')
+  assert.ok(all.includes('游戏评价观察（只读）'), '缺少游戏评价那一段')
+  // games 默认关着 → 只留开关和说明，不展开榜单/清单
+  assert.ok(!all.includes('从哪个榜单挑'), 'games 关着时不该展开榜单选择')
+})
+
+test('打开游戏评价后才展开榜单 / 清单 / 试读按钮', async () => {
+  const D = await defaults()
+  D.browse = { ...(D.browse || {}), enabled: true }
+  D.games = { ...(D.games || {}), enabled: true }
+  const status = { ok: true, credentials: { present: true, uid: '1', nickname: 'n', hasPauth: true }, aiReady: true, traffic: { readHour: 0, readDay: 0, writeHour: 0, writeDay: 0 }, listen: { running: false }, browse: { enabled: true, hasSession: true } }
+  const { mod, React } = await loadClient({ 0: D, 1: status })
+  React.__reset()
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
+  const all = texts(tree).join(' ')
+  for (const t of ['从哪个榜单挑', '指定游戏 id', '每轮看几个游戏', '试读一批评价']) {
+    assert.ok(all.includes(t), '缺少控件：' + t)
+  }
+  assert.ok(!/undefined|NaN/.test(all), '展开后漏出了 undefined / NaN')
 })

@@ -1,8 +1,15 @@
 // AI 层：OpenAI 兼容 /v1/chat/completions。没有 baseUrl/model/key 就直接抛错，不假装跑通。
+//
+// 线路（line）：直连那条 + 若干个中转站。
+//   · direct  用 ai.baseUrl / ai.model，密钥在 ~/.hykb-ai/ai-key
+//   · relay   用 relays[] 里的某一条，密钥在 ~/.hykb-ai/relay-keys.json
+//   activeRelay 决定先走谁；fallback 开着时，主线路失败就按顺序试下一个可用的。
+//   所有线路在进模型之前都要过「破甲模型」判定 —— 中转站里挂的无审查权重一律不接。
 import fs from 'node:fs'
-import { config } from './config.mjs'
+import { config, relayKey, loadRelayKeys, resolveSuffix } from './config.mjs'
 import { withTimeout, TIMEOUT_MS } from './traffic.mjs'
 import { personaPath } from './paths.mjs'
+import { modelVerdict } from './safety.mjs'
 
 /**
  * baseUrl 只允许 http(s)：它会被拼成 `baseUrl + '/chat/completions'` 再带上 Bearer 密钥发出去，
@@ -22,34 +29,205 @@ export function aiEndpoint(baseUrl) {
   return raw.replace(/\/+$/, '')
 }
 
+/**
+ * 把字符串修成「合法 UTF-16」：孤立代理项一律换成 U+FFFD。
+ *
+ * 为什么必须有这一层：论坛楼层里全是 emoji，正文按「码元」截断（slice(0,120)）很容易把一对代理项切成一半。
+ * 这串东西在 JS 里合法、JSON.stringify 也合法，但发给 DeepSeek 会被它自己的解析器拒掉：
+ *   HTTP 400 Failed to parse the request body as JSON: messages[1].content: unexpected end of hex escape
+ * （实测踩过：一条带 🌽 的楼层被截在半路，整份日报的 AI 综述直接掉回骨架）。
+ * Node 20+ 有 String.prototype.toWellFormed，没有就原样返回。
+ */
+export const wellFormed = (s) => (typeof s === 'string' && typeof s.toWellFormed === 'function' ? s.toWellFormed() : String(s ?? ''))
+
 export function aiReady() {
   const { ai } = config()
   if (!(ai.baseUrl && ai.model && ai.apiKey)) return false
   try { aiEndpoint(ai.baseUrl); return true } catch { return false }
 }
 
-export async function chat(messages, { temperature, maxTokens } = {}) {
-  const { ai } = config()
-  if (!ai.baseUrl || !ai.model || !ai.apiKey) {
-    throw new Error('AI 未配置：去设置页填 baseUrl / model / apiKey')
+/* ───────────── 线路：直连 + 中转站 ───────────── */
+
+/**
+ * 把一整套线路摊平成数组，activeRelay 指定的排最前。
+ * 只保留「三项齐全 + 地址合法 + 没被破甲判定拦下」的线路。
+ * @returns {Array<{id:string, name:string, baseUrl:string, model:string, apiKey:string}>}
+ */
+export function lines(cfg = config()) {
+  const ai = cfg?.ai || {}
+  const all = []
+  const push = (id, name, baseUrl, model, key) => {
+    const b = String(baseUrl || '').trim()
+    const m = String(model || '').trim()
+    const k = String(key || '').trim()
+    if (!b || !m || !k) return
+    try { aiEndpoint(b) } catch { return }
+    // 破甲模型：模型名 / 地址 / 站名任意一处命中就不接这条线路
+    if (!modelVerdict({ model: m, baseUrl: b, name }).ok) return
+    all.push({ id, name, baseUrl: b.replace(/\/+$/, ''), model: m, apiKey: k })
   }
-  const url = aiEndpoint(ai.baseUrl) + '/chat/completions'
+  push('direct', '直连', ai.baseUrl, ai.model, ai.apiKey)
+  const keys = loadRelayKeys()
+  for (const r of Array.isArray(ai.relays) ? ai.relays : []) {
+    if (!r || r.enabled === false) continue
+    const id = String(r.id || '').trim()
+    if (!id) continue
+    push(id, String(r.name || id), r.baseUrl, r.model, keys[id])
+  }
+  const active = String(ai.activeRelay || 'direct')
+  const first = all.findIndex((x) => x.id === active)
+  if (first > 0) all.unshift(...all.splice(first, 1))
+  return ai.fallback === false ? all.slice(0, 1) : all
+}
+
+/** 线路是否就绪（任意一条可用即真）。 */
+export function aiReadyAny(cfg = config()) {
+  return lines(cfg).length > 0
+}
+
+export async function chat(messages, { temperature, maxTokens, cfg = config() } = {}) {
+  const L = lines(cfg)
+  if (!L.length) throw new Error(emptyReason(cfg))
+  const errs = []
+  for (const line of L) {
+    try {
+      return await chatOnce(line, messages, { temperature, maxTokens, cfg })
+    } catch (e) {
+      // 安全拒答不许回退：同一段输入换个线路还是同一套审核，回退只会白烧 token。
+      // 直接抛给上层，让它按「命中」处理（回固定话术或不发）。
+      if (e.safetyBlocked) throw e
+      errs.push((line.name || line.id) + '：' + e.message)
+      if (cfg?.ai?.fallback === false) break
+    }
+  }
+  throw new Error(errs.length > 1 ? ('所有线路都失败 → ' + errs.join(' ｜ ')) : errs[0])
+}
+
+/**
+ * 「一条线路都没有」时说清楚到底是哪种没有。
+ * 三种情况用户要做的事完全不同：
+ *   三项没填 → 去填；填了但密钥空 → 补密钥；填了但被破甲判定拦 → 换模型。
+ * 混成一句「AI 未配置」会让人以为没保存成功。
+ */
+function emptyReason(cfg) {
+  const ai = cfg?.ai || {}
+  const relays = (Array.isArray(ai.relays) ? ai.relays : []).filter((r) => r && r.enabled !== false)
+  const directFilled = Boolean(ai.baseUrl && ai.model)
+  const directHasKey = Boolean(ai.apiKey)
+  const relayWithKey = (() => {
+    try { const keys = loadRelayKeys(); return relays.filter((r) => r.baseUrl && r.model && keys[r.id]).length } catch { return 0 }
+  })()
+  const anyFilled = directFilled || relays.some((r) => r.baseUrl && r.model)
+
+  if (!anyFilled) return 'AI 未配置：去设置页填 baseUrl / model / apiKey'
+  // 填了地址和模型，但没有可用的密钥
+  if ((directFilled && !directHasKey) && !relayWithKey) {
+    return 'AI 缺密钥：地址和模型填好了，但直连和所有中转站都还没有密钥'
+  }
+  // 填全了却没有一条进 lines() → 只可能是被破甲判定拦下（或地址协议不对）
+  const blocked = []
+  const chk = (label, o) => {
+    const v = modelVerdict(o)
+    if (!v.ok) blocked.push(label + '（' + v.hits.join('、') + '）')
+    else {
+      try { aiEndpoint(o.baseUrl) } catch { blocked.push(label + '（接口地址不是 http/https 或不是合法地址）') }
+    }
+  }
+  if (directFilled) chk('直连', { model: ai.model, baseUrl: ai.baseUrl, name: '直连' })
+  for (const r of relays) if (r.baseUrl && r.model) chk(r.name || r.id, { model: r.model, baseUrl: r.baseUrl, name: r.name })
+  if (blocked.length) return 'AI 没有可用线路：这些被拦下了 → ' + blocked.join('；') + '。破甲模型请换成正经营业的模型'
+  return 'AI 没有可用线路：检查接口地址、模型名与密钥三项是否齐全'
+}
+
+/** 真发一次请求。线路参数由 lines() 给，这里不读配置。 */
+/**
+ * DeepSeek 官方接口才认 `safety_check`。
+ * 官方文档里它只在 api.deepseek.com 上有效，中转站收到未知字段可能直接 400，
+ * 所以按 hostname 精确判断，而不是「看着像 DeepSeek」就塞。
+ */
+export function isDeepSeekOfficial(baseUrl) {
+  try {
+    const h = new URL(String(baseUrl)).hostname.toLowerCase()
+    return h === 'api.deepseek.com' || h.endsWith('.deepseek.com')
+  } catch { return false }
+}
+
+/**
+ * 这条线路该带什么 safety_check。
+ * @returns {'high'|'low'|null} null = 不传这个字段
+ */
+export function safetyCheckFor(line, cfg) {
+  const level = String(cfg?.ai?.safetyCheck ?? 'high').toLowerCase()
+  if (level !== 'high' && level !== 'low') return null      // 'off' / 其它值 = 不传
+  if (!isDeepSeekOfficial(line?.baseUrl)) return null       // 非官方线路不传，避免 400
+  return level
+}
+
+/** 最近一次成功请求的安全审核旁路信息（给 /status 与日志用）。 */
+let lastSafety = null
+export function takeLastSafety() { const v = lastSafety; lastSafety = null; return v }
+
+async function chatOnce(line, messages, { temperature, maxTokens, cfg } = {}) {
+  const ai = cfg?.ai || {}
+  const url = aiEndpoint(line.baseUrl) + '/chat/completions'
+  const level = safetyCheckFor(line, cfg)
+  const body = {
+    model: line.model,
+    // 出网前最后一道：孤立代理项会让对方的 JSON 解析器 400（见 wellFormed 的注释）
+    messages: (Array.isArray(messages) ? messages : []).map((m) => ({ ...m, content: wellFormed(m?.content) })),
+    temperature: temperature ?? ai.temperature ?? 0.7,
+    max_tokens: maxTokens ?? ai.maxTokens ?? 800,
+  }
+  // 官方文档：level 只能是 low / high；开了之后连接不会提前关，
+  // 服务端还要对完整输出再审一遍，之后响应才可能以拒答结束。
+  if (level) body.safety_check = { level }
+
   const res = await fetch(url, withTimeout({
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ai.apiKey },
-    body: JSON.stringify({
-      model: ai.model,
-      messages,
-      temperature: temperature ?? ai.temperature ?? 0.7,
-      max_tokens: maxTokens ?? ai.maxTokens ?? 800,
-    }),
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + line.apiKey },
+    body: JSON.stringify(body),
   }))
   const text = await res.text()
   let data
   try { data = JSON.parse(text) } catch { throw new Error('AI 返回非 JSON：' + text.slice(0, 200)) }
+
+  // 输入未通过审核 → 400 Content Exists Risk（官方文档明确写的就是这个）。
+  // 这不是"线路坏了"：换线路是同一段输入、同一个服务，重试只会白烧 token，
+  // 所以标成 safetyBlocked 让上层直接按"命中"处理，不要走线路回退。
+  if (res.status === 400) {
+    const msg = String(data?.error?.message || text || '')
+    if (/content exists risk/i.test(msg)) {
+      const e = new Error('输入未通过 DeepSeek 内容审核（Content Exists Risk）')
+      e.safetyBlocked = true
+      throw e
+    }
+    if (/safety_check/i.test(msg)) {
+      const e = new Error('这条线路不认 safety_check 参数：' + msg.slice(0, 120))
+      e.safetyUnsupported = true
+      throw e
+    }
+  }
   if (!res.ok) throw new Error('AI HTTP ' + res.status + '：' + (data.error?.message || text.slice(0, 200)))
+
+  // 输出未通过审核 → 非流式时 content 被清空，并给 refusal 标识。
+  // 同样不重试：同一段输入重发一遍只会再被拒一次。
+  const usage = data.usage || {}
+  const meta = {
+    safetyCheck: level,
+    safetyTokens: usage.completion_tokens_details?.safety_tokens ?? usage.output_tokens_details?.safety_tokens ?? null,
+    refusal: data.choices?.[0]?.message?.refusal ?? null,
+    line: line.id,
+  }
   const content = data.choices?.[0]?.message?.content
-  if (!content) throw new Error('AI 返回空内容：' + JSON.stringify(data).slice(0, 300))
+  if (!content) {
+    if (meta.refusal) {
+      const e = new Error('模型拒答（DeepSeek 内容审核）：' + String(meta.refusal).slice(0, 120))
+      e.safetyBlocked = true
+      throw e
+    }
+    throw new Error('AI 返回空内容：' + JSON.stringify(data).slice(0, 300))
+  }
+  lastSafety = meta
   return content.trim()
 }
 
@@ -67,8 +245,9 @@ export function tidy(s, max = 140) {
     if (t === before) break
   }
   t = t.replace(/\s+/g, ' ').trim()
-  if (t.length > max) t = t.slice(0, max) + '…'
-  return t
+  // 截断可能把 emoji 的代理对切成一半 → 出网前必须修成合法 UTF-16（否则 DeepSeek 直接 400）
+  if (t.length > max) t = wellFormed(t.slice(0, max)) + '…'
+  return wellFormed(t)
 }
 
 /** 楼层去重：同一句话刷很多遍只留一条，纯 emoji / 过短的丢掉。 */
@@ -149,10 +328,13 @@ export function withRules(messages, cfg) {
  * 不靠模型自觉：模型可能漏写、改写、写在开头，所以由代码兜底。
  * 模型已经自己写了同一句就先去掉，避免重复；总长超过 max 时截正文、保后缀。
  */
-export function applySuffix(text, { suffix = config()?.prompt?.suffix, max = Infinity, sep = ' ' } = {}) {
+export function applySuffix(text, { suffix, max = Infinity, sep = ' ' } = {}) {
   const body0 = String(text || '').trim()
-  const tail = String(suffix || '').trim()
-  if (!tail || !body0) return body0
+  // 后缀由 config.resolveSuffix 定：用户填了用他的，没填强制用默认的「-内容由AI生成」。
+  // 这里不再有"留空 = 不加"这条路 —— AI 生成的内容必须带标识。
+  const tail = typeof suffix === 'string' && suffix ? resolveSuffix({ prompt: { suffix } }) : resolveSuffix()
+  if (!body0) return body0
+  if (!tail) return body0
   const esc = tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   // 去掉模型自己加的同一句（允许包着括号、前面有标点）
   const re = new RegExp('[\\s（(【\\[—-]*' + esc + '[\\s）)】\\]。.！!]*$')
@@ -321,3 +503,21 @@ export function browseReplyPrompt({ topic, floors, persona, gist }) {
     },
   ])
 }
+
+/* ───────────── 表情：门面导出 ───────────── */
+
+/**
+ * 表情层的入口放在这儿，上层只 import ai.mjs 就够。
+ * ⚠️ 顺序契约：tidy() / digest 的 strip() 都用 /<[^>]+>/g 剥标签，会把 <kb-emoji …/> 整块吃掉；
+ *    render 之后再 slice / 截断会把标签砍断成碎片。所以顺序只能是「清洗 → 截断 → render()」，
+ *    render 之后不许再 tidy / slice。
+ */
+export {
+  EMOJI_SET,
+  EMOJI_SETS,
+  emojiNames,
+  render,
+  stripEmoji,
+  hasEmoji,
+  EMOJI_PROMPT_RULE,
+} from './emoji.mjs'

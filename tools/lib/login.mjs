@@ -1,4 +1,4 @@
-// 扫码登录：网页扫码登录的状态机，不需要浏览器。
+// 扫码登录：完全照抄 login_e1.js 的 QRLogin 状态机，但不需要浏览器。
 import { qrCreate, qrPoll, qrAuthCallback } from './hykb-api.mjs'
 import { saveCred, deriveCred } from './cred.mjs'
 

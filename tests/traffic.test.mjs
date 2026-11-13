@@ -11,7 +11,7 @@ process.env.HOME = home
 process.env.USERPROFILE = home
 process.env.DSH_HOME = path.join(home, '.dsh')
 fs.mkdirSync(path.join(home, '.dsh'), { recursive: true })
-const cfgFile = path.join(home, '.dsh', 'hykb-whale.config.json')
+const cfgFile = path.join(home, '.dsh', 'hykb-scroll.config.json')
 fs.writeFileSync(cfgFile, JSON.stringify({
   risk: { minGapMs: 0, readHourly: 1000, readDaily: 1000, writeHourly: 1000, writeDaily: 5, writeGapSec: 0, backoffOnBlock: [1] },
 }))

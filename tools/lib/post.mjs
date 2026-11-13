@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import { setThread } from './hykb-api.mjs'
 import { loadCred, missingForWrite, CODE_HINTS } from './cred.mjs'
 import { threadUrl, applySuffix } from './ai.mjs'
+import { screenOutbound, describeVerdict } from './safety.mjs'
 import { audit } from './state.mjs'
 import { postLogPath, credDir, ensureDir, harden } from './paths.mjs'
 
@@ -107,6 +108,18 @@ export async function publishDigest({ body, picks, cfg, date, dryRun = false, fo
   let title = postTitle(P.title, { date })
   const html = toThreadHtml(markdown)
   if (!html) return { status: 'skipped', reason: '日报是空的' }
+
+  // 发帖是「往公开板块贴一篇文章」，出站闸必须过：标题和正文都查，命中直接不发。
+  const S = cfg?.safety || {}
+  if (S.enabled !== false && S.blockOutbound !== false) {
+    for (const [what, v] of [['标题', screenOutbound(title, cfg)], ['正文', screenOutbound(markdown, cfg)]]) {
+      if (!v.ok) {
+        log('[post] ' + what + '命中' + describeVerdict(v) + '，这篇不发')
+        audit({ action: 'post', fid: sec.id, title, ok: false, msg: 'safety-' + v.why })
+        return { status: 'skipped', reason: what + '命中违禁内容（' + describeVerdict(v) + '），不发', title, section: sec }
+      }
+    }
+  }
 
   const book = loadPostLog()
   const done = postedToday(date, book)

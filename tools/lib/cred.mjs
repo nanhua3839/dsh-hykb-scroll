@@ -29,10 +29,12 @@ export function loadCred() {
 
 /**
  * 快爆的登录态里**没有独立的 uid cookie** —— uid 只存在于 Pauth 里。
- * Pauth 的结构：
+ * Pauth 的结构（ucenter.js:934 的注释与 Passport.get 的解析一致）：
  *   uid|nickname|avatar|credential|expires|sign[|...]
  * nickname 段是 URL 编码的，且用户名本身可能带 "|"（服务端靠段数差 add_key 反推），
  * 所以昵称要按"总段数 - 6"取前若干段拼回来，不能只取第 2 段。
+ * 早先的扫码链路要求 jar 里同时有 uid 与 Pauth，于是永远等不到 uid，
+ * 页面就一直停在"已确认，正在写入登录态"。这里把 uid 从 Pauth 里解出来。
  */
 export function uidFromPauth(Pauth) {
   const v = String(Pauth || '')

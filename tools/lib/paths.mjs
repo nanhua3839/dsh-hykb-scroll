@@ -9,16 +9,36 @@ const DSH_HOME = process.env.DSH_HOME || path.join(HOME, '.dsh')
 
 export const dshHome = () => DSH_HOME
 export const dshPath = (...p) => path.join(DSH_HOME, ...p)
-export const configPath = () => process.env.HYKB_WHALE_CONFIG || path.join(DSH_HOME, 'hykb-whale.config.json')
+const CONFIG_FILE = path.join(DSH_HOME, 'hykb-scroll.config.json')
+/** 改名前的配置文件：首次读到新文件不存在时搬过来，别让使用者的设置凭空消失。 */
+const LEGACY_CONFIG_FILE = path.join(DSH_HOME, 'hykb-whale.config.json')
+
+export const configPath = () => {
+  const file = process.env.HYKB_SCROLL_CONFIG || CONFIG_FILE
+  if (file === CONFIG_FILE && !fs.existsSync(file) && fs.existsSync(LEGACY_CONFIG_FILE)) {
+    try { fs.copyFileSync(LEGACY_CONFIG_FILE, file) } catch {}
+  }
+  return file
+}
 export const credDir = () => path.join(HOME, '.hykb-ai')
 export const credentialsPath = () => path.join(credDir(), 'credentials.json')
 export const ledgerPath = () => path.join(credDir(), 'traffic-ledger.json')
 export const auditPath = () => path.join(credDir(), 'audit.jsonl')
 export const seenPath = () => path.join(credDir(), 'seen.json')
 export const postLogPath = () => path.join(credDir(), 'posts.json')
+/** 浏览记录：她读过/回过/跳过的帖，一行一条 JSONL。与 activity（一轮一条）不是一回事。 */
+export const historyPath = () => path.join(credDir(), 'browsed.jsonl')
+/** 复读台账：发过的话（归一化 + 近似度查重用）。JSONL 追加写，与 seen.json 不是一回事。 */
+export const saidPath = () => path.join(credDir(), 'said.jsonl')
+/** 回关台账：基线、每个粉丝的处理结果、每日计数。与 seen.json（回帖去重）分开，互不影响。 */
+export const fansPath = () => path.join(credDir(), 'fans.json')
+/** App 登录态（user_token）：和网页 cookie 分开存，单独收权，不进配置文件。 */
+export const appTokenPath = () => path.join(credDir(), 'app-token.json')
 export const personaPath = () => path.join(credDir(), 'persona.md')
 /** AI 密钥单独存一个文件：配置文件常被设置页整份回写、也常被拷来拷去，密钥不该跟着走。 */
 export const aiKeyPath = () => path.join(credDir(), 'ai-key')
+/** 中转站密钥表 { relayId: key }：与直连密钥分开存，同样不进配置文件。 */
+export const relayKeysPath = () => path.join(credDir(), 'relay-keys.json')
 export const workDir = () => path.join(DSH_HOME, 'hykb-work')
 /** 日报落盘：~/.dsh/hykb-work/digest-YYYY-MM-DD.md（同一天多次刷帖是追加，不覆盖） */
 export const digestDir = () => path.join(DSH_HOME, 'hykb-work')

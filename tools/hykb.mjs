@@ -10,6 +10,8 @@
 //   hykb.mjs summary <topicId>     AI 总结
 //   hykb.mjs listen               常驻监听（大号@小号 → AI 回复）
 //   hykb.mjs traffic              看限流状态
+//   hykb.mjs history [条数]       浏览记录（她读过/回过/跳过的帖，带发布/修改/最近回复时间）
+//   hykb.mjs games                试读一批游戏评价（只读，不发任何评价）
 import { createRequire } from 'node:module'
 import { loadCred, missingForWrite, writeFailText, cookieHeader } from './lib/cred.mjs'
 import { config, writeConfig, configPath } from './lib/config.mjs'
@@ -22,7 +24,11 @@ import { tick as watchTick, resetPrimed, inWindow } from './lib/watch.mjs'
 import { sectionTopics, sectionCatalog, parseSectionId, parseTopicId } from './lib/forum.mjs'
 import { previewDigest, runDigest } from './lib/digest.mjs'
 import { resolveSections } from './lib/browse.mjs'
+import { list as listHistory, counts as historyCounts, clear as clearHistory } from './lib/history.mjs'
+import { resolveGames, gameComments, pickComments, gameBlock } from './lib/games.mjs'
 import { digestPath, digestDir } from './lib/paths.mjs'
+import { scan as scanFans, dueList, pendingList, remaining, todayCount, loadFans, saveFans } from './lib/fans.mjs'
+import { runOnce as runFollowback, status as followStatus } from './lib/followback.mjs'
 
 const [cmd, ...args] = process.argv.slice(2)
 const fail = (m) => { console.error('✗ ' + m); process.exit(1) }
@@ -227,6 +233,12 @@ async function cmdBrowse() {
   }
   const dry = args.includes('--dry') || !args.includes('--send')
   const r = await previewDigest(cfg, { log: (m) => console.log(m) })
+  const cov = r.coverage || {}
+  if (cov.sections != null) {
+    console.log('\n覆盖：' + cov.sections + ' 个板块 · 今日抓到 ' + (cov.postsToday ?? r.scanned) + ' 帖 · ' +
+      (cov.requests ?? '?') + ' 次请求 · ' + (cov.reachedCutoff === true ? '已翻到当日首帖' : '未翻到当日首帖（下一轮继续补）'))
+    if (Array.isArray(cov.gaps) && cov.gaps.length) console.log('缺口：' + cov.gaps.slice(0, 5).map((g) => g.title || g.id || g).join('、'))
+  }
   console.log('\n扫到 ' + r.scanned + ' 帖，前 ' + r.top.length + ' 名：')
   for (const t of r.top) {
     console.log('  ' + String(t.score).padStart(6) + ' 分  ' + t.topicId + '  ' + String(t.title || '(无标题)').slice(0, 34).padEnd(36) + '  ' + (t.sectionTitle || '') + '  回复' + t.replyCount)
@@ -245,7 +257,170 @@ async function cmdDigest() {
   if (r.text) { console.log('\n--- 日报正文 ---\n'); console.log(r.text) }
 }
 
-const TABLE = { login: cmdLogin, whoami: cmdWhoami, read: cmdRead, reply: cmdReply, comment: cmdComment, del: cmdDel, summary: cmdSummary, traffic: cmdTraffic, listen: cmdListen, watch: cmdWatch, forum: cmdForum, browse: cmdBrowse, digest: cmdDigest, config: async () => console.log(configPath()) }
+/* ─────────── 粉丝 / 回关 ─────────── */
+// 只读：拉一轮关注通知、看台账、看今天还剩多少额度。回关写入在 App 网关，尚未接入。
+async function cmdFans() {
+  const cfg = config()
+  const fb = cfg.followback || {}
+  const dry = args.includes('--dry')
+  const json = args.includes('--json')
+  const reset = args.includes('--reset-baseline')
+
+  if (reset) {
+    const st = loadFans()
+    st.baselineAt = ''
+    st.seen = {}
+    saveFans(st)
+    console.log('已清空基线：下一轮会把当前可见的粉丝当成历史登记，不再回关')
+    return
+  }
+
+  if (dry) {
+    // 只看不发：不碰网络，只读台账
+    const state = loadFans()
+    const pend = pendingList(state, { cfg: fb })
+    const due = dueList(state, { cfg: fb })
+    console.log('基线：' + (state.baselineAt || '（还没建）'))
+    console.log('待回关 ' + pend.length + ' 个　今天已回关 ' + todayCount(state) + '/' + (fb.dailyCap ?? 0) +
+      '　本批可做 ' + due.length + ' 个' + (fb.enabled ? '' : '（开关关着）'))
+    for (const p of pend.slice(0, 30)) console.log('  ' + p.uid + '  ' + (p.nickname || '(无昵称)') + '  relation=' + p.relation)
+    if (pend.length > 30) console.log('  …共 ' + pend.length + ' 个')
+    return
+  }
+
+  const r = await scanFans({ cfg: fb })
+  if (!r.ok) fail('读关注通知失败：' + (r.msg || r.code))
+  if (json) { console.log(JSON.stringify({ items: r.items, added: r.added, pending: pendingList(r.state, { cfg: fb }), daily: todayCount(r.state), cap: fb.dailyCap ?? 0 }, null, 2)); return }
+  console.log('粉丝 ' + r.items + ' 个，其中新来的 ' + r.added + ' 个' + (r.first ? '（首次运行，只登记基线）' : ''))
+  if (r.pending.length) {
+    console.log('本轮新增待回关：')
+    for (const p of r.pending) console.log('  + ' + p.uid + '  ' + (p.nickname || '(无昵称)') + '  relation=' + p.relation)
+  }
+  const pend = pendingList(r.state, { cfg: fb })
+  console.log('累计待回关 ' + pend.length + ' 个　今天额度 ' + todayCount(r.state) + '/' + (fb.dailyCap ?? 0) + '（剩 ' + remaining(r.state, fb) + '）')
+  console.log('回关写入需要 App 网关 client token，尚未接入；本命令只读。')
+}
+
+async function cmdFollowback() {
+  const cfg = config()
+  const send = args.includes('--send')
+  const r = await runFollowback({ cfg, dryRun: !send })
+  console.log('粉丝 ' + r.scanned + ' 个，其中新来的 ' + r.added + ' 个，本批该回关 ' + r.due + ' 个')
+  for (const x of r.results || []) console.log('  ' + (x.ok ? '✓ ' : '✗ ') + x.uid + '  ' + (x.nickname || '') + '  code=' + x.code)
+  console.log((send ? '' : '（dry-run，未真的关注）') + (r.skipped ? '　跳过原因：' + r.skipped : '') + '　剩 ' + (r.remaining ?? '?') + ' 个额度')
+}
+
+/** 浏览记录：她读过/回过/跳过的帖（含三个时间）。 */
+async function cmdHistory() {
+  if (args.includes('--clear')) { clearHistory(); console.log('✓ 浏览记录已清空'); return }
+  const limit = Math.max(1, Math.min(500, Number(args[0]) || 30))
+  const items = listHistory({ limit })
+  const c = historyCounts()
+  console.log('今天：回过 ' + c.reply + '　写进日报 ' + c.digest + '　跳过 ' + c.skip + '　合计 ' + c.total)
+  if (!items.length) { console.log('（没有记录）'); return }
+  const pad = (s, n) => String(s).padEnd(n).slice(0, n)
+  for (const it of items) {
+    const when = (it.at || '').replace('T', ' ').slice(0, 19)
+    console.log(when + '  ' + pad(it.actionText || it.action, 6) + '  ' + (it.title || '(无标题)').slice(0, 40))
+    console.log('           ' + (it.sectionTitle || it.sectionId || '—') + ' · ' + (it.nickname || it.uid || '—')
+      + ' · 发布 ' + (it.publishedText || '—') + ' · 修改 ' + (it.editedText || '无') + ' · 最近回复 ' + (it.repliedText || '—')
+      + (it.why ? ' · ' + it.why : ''))
+  }
+}
+
+/** 内容安全：查词表 / 试一句话 / 看复读库 / 清复读库。与设置页走同一个 safety.mjs。 */
+async function cmdSafety() {
+  const S = await import('./lib/safety.mjs')
+  const cfg = config()
+  const sub = args[0] || 'status'
+  if (sub === 'list') {
+    for (const c of S.CATEGORIES) {
+      console.log('')
+      console.log('【' + c.label + '】共 ' + (S.BUILTIN[c.key] || []).length + ' 条' + (cfg.safety?.[c.key] === false ? '（当前已关）' : ''))
+      console.log('  ' + (S.BUILTIN[c.key] || []).join('、'))
+    }
+    console.log('')
+    console.log('【破甲提示词】共 ' + S.JAILBREAK.length + ' 条')
+    console.log('  ' + S.JAILBREAK.join('、'))
+    console.log('')
+    console.log('【破甲模型特征】共 ' + S.JAILBREAK_MODEL.length + ' 条')
+    console.log('  ' + S.JAILBREAK_MODEL.join('、'))
+    return
+  }
+  if (sub === 'test') {
+    const text = args.slice(1).join(' ')
+    if (!text) fail('用法：hykb.mjs safety test <一段文本>')
+    const inb = S.screenInbound(text, cfg)
+    const outb = S.screenOutbound(text, cfg)
+    const jb = S.scanJailbreak(text)
+    console.log('入站闸：' + (inb.ok ? '放行' : '拦下（' + S.describeVerdict(inb) + '）'))
+    console.log('出站闸：' + (outb.ok ? '放行' : '拦下（' + S.describeVerdict(outb) + '）'))
+    console.log('破甲词：' + (jb.ok ? '没有' : '命中 ' + jb.hits.join('、')))
+    return
+  }
+  if (sub === 'said') {
+    const D = await import('./lib/dedupe.mjs')
+    if (args[1] === '--clear') { D.clearSaid(); console.log('✓ 复读台账已清空'); return }
+    const s = D.saidStats({ cfg })
+    console.log('复读台账：共 ' + s.total + ' 条，' + s.days + ' 天窗口内 ' + s.inWindow + ' 条')
+    console.log('查重窗口 ' + (cfg.risk?.dedupeDays ?? 14) + ' 天，近似阈值 ' + (cfg.risk?.dedupeSimilar ?? 0.86))
+    return
+  }
+  // status
+  const on = (k) => (cfg.safety?.[k] === false ? '关' : '开')
+  console.log('内容安全总闸：' + on('enabled'))
+  console.log('  国家/政治 ' + on('politics') + '　色情 ' + on('sexual') + '　血腥暴力 ' + on('violence'))
+  console.log('  入站（别人写的，命中不接话、不调模型）：' + on('blockInbound'))
+  console.log('  出站（模型写的，命中不发）：' + on('blockOutbound'))
+  console.log('  命中话术：' + (cfg.safety?.refuseText || '（留空 = 静默跳过）'))
+  console.log('  自加词 ' + (cfg.safety?.extraWords || []).length + ' 条，例外词 ' + (cfg.safety?.allowWords || []).length + ' 条')
+  const D = await import('./lib/dedupe.mjs')
+  const s = D.saidStats({ cfg })
+  console.log('复读台账：' + s.total + ' 条（' + s.days + ' 天窗口内 ' + s.inWindow + ' 条）')
+}
+
+/** 中转站：列线路 / 看当前走哪条 / 清某条密钥。 */
+async function cmdRelays() {
+  const A = await import('./lib/ai.mjs')
+  const cfg = config()
+  const sub = args[0] || 'list'
+  const ai = cfg.ai || {}
+  if (sub === 'clear') {
+    const id = String(args[1] || '').trim().toLowerCase()
+    if (!id) fail('用法：hykb.mjs relays clear <线路id>')
+    const keys = (await import('./lib/config.mjs')).loadRelayKeys()
+    delete keys[id]
+    ;(await import('./lib/config.mjs')).saveRelayKeys(keys)
+    console.log('✓ 已清掉「' + id + '」的密钥')
+    return
+  }
+  console.log('当前线路：' + (ai.activeRelay || 'direct') + (ai.fallback === false ? '（关掉了失败回退）' : ''))
+  const usable = A.lines(cfg).map((x) => x.id)
+  console.log('可用线路 ' + usable.length + ' 条' + (usable.length ? '：' + usable.join('、') : '（一条都不可用）'))
+  const rows = [{ id: 'direct', name: '直连', baseUrl: ai.baseUrl, model: ai.model }].concat(ai.relays || [])
+  for (const r of rows) {
+    const hasKey = usable.includes(r.id) || (r.id === 'direct' ? Boolean(ai.apiKey) : false)
+    const v = (await import('./lib/safety.mjs')).modelVerdict({ model: r.model, baseUrl: r.baseUrl, name: r.name })
+    console.log('  ' + (usable.includes(r.id) ? '✓' : '·') + ' ' + r.id.padEnd(12) + (r.name || '').padEnd(14)
+      + ' ' + (r.baseUrl || '（没填地址）') + '  ' + (r.model || '（没填模型）')
+      + '  密钥:' + (hasKey ? '有' : '无') + (v.ok ? '' : '  ⛔ 破甲模型特征：' + v.hits.join('、')))
+  }
+}
+
+async function cmdGames() {
+  const cfg = config()
+  const games = await resolveGames(cfg, { log: console.log })
+  if (!games.length) { console.log('（没拿到游戏：清单为空且榜单没解析出来）'); return }
+  for (const g of games) {
+    const j = await gameComments(g.id)
+    if (j.code !== 100) { console.log('✗ ' + g.id + ' code=' + j.code + ' ' + (j.msg || '')); continue }
+    const cs = pickComments(j.result?.data, { max: cfg.games?.maxComments, minLen: cfg.games?.minLen })
+    console.log('')
+    console.log(gameBlock({ ...g, star: Number(j.result?.star_info?.star) || 0 }, cs.slice(0, 5)))
+  }
+}
+
+const TABLE = { login: cmdLogin, fans: cmdFans, followback: cmdFollowback, whoami: cmdWhoami, read: cmdRead, reply: cmdReply, comment: cmdComment, del: cmdDel, summary: cmdSummary, traffic: cmdTraffic, listen: cmdListen, watch: cmdWatch, forum: cmdForum, browse: cmdBrowse, digest: cmdDigest, history: cmdHistory, games: cmdGames, safety: cmdSafety, relays: cmdRelays, config: async () => console.log(configPath()) }
 const fn = TABLE[cmd]
 if (!fn) { console.log('用法: hykb.mjs <' + Object.keys(TABLE).join('|') + '>'); process.exit(1) }
 fn().catch((e) => fail(e.message))

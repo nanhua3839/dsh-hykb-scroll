@@ -90,10 +90,13 @@ export async function guardedFetch(url, init = {}, kind = 'read') {
     throw new Error('风控暂停中，还需 ' + left + ' 秒（撞到 ' + blockRound + ' 级退避）')
   }
 
-  const b = nowBuckets(load())
+  const l = load()
+  const b = nowBuckets(l)
   if (kind === 'read') {
-    if (b.readHour >= risk.readHourly) throw new Error('读预算用尽：本小时 ' + b.readHour + '/' + risk.readHourly + '，等到下一个整点')
-    if (b.readDay >= risk.readDaily) throw new Error('读预算用尽：今天 ' + b.readDay + '/' + risk.readDaily)
+    // 小时窗口从本窗口第一次读开始算满 60 分钟（不是整点），所以直接报还剩几分钟
+    const leftMin = Math.max(1, Math.ceil(((l.readHourTs || now) + HOUR - now) / 60000))
+    if (b.readHour >= risk.readHourly) throw new Error('读预算用尽：本小时 ' + b.readHour + '/' + risk.readHourly + '，约 ' + leftMin + ' 分钟后恢复（可在「安全阀」调高）')
+    if (b.readDay >= risk.readDaily) throw new Error('读预算用尽：今天 ' + b.readDay + '/' + risk.readDaily + '，明天 0 点恢复（可在「安全阀」调高）')
   } else {
     if (b.writeHour >= risk.writeHourly) throw new Error('写预算用尽：本小时 ' + b.writeHour + '/' + risk.writeHourly)
     if (b.writeDay >= risk.writeDaily) throw new Error('写预算用尽：今天 ' + b.writeDay + '/' + risk.writeDaily)
@@ -103,6 +106,9 @@ export async function guardedFetch(url, init = {}, kind = 'read') {
 
   const wait = risk.minGapMs - (now - lastAt)
   if (wait > 0) await sleep(wait)
+  // 固定毫秒节奏本身就是一个指纹：每 1500ms 一次、误差 0。再抖一层，落在 minGap ± gapJitterMs 里。
+  const jit = Math.max(0, Number(risk.gapJitterMs) || 0)
+  if (jit) await sleep(Math.floor(Math.random() * jit))
   lastAt = Date.now()
 
   let res

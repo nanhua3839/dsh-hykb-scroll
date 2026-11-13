@@ -1,4 +1,9 @@
 // 快爆接口层：所有路径集中在这里，改域名只改这个文件。
+//
+// 三个网关互不通用（踩过的坑）：
+//   · m.bbs.3839.com/wap.php        GET  —— 只读，免登录，拿帖子正文和楼层
+//   · bbs3839.5054399.com/app/wap.php POST —— 模块白名单，写接口不在里面
+//   · bbs.3839.com/index.php?m=api&c=  POST —— PC 论坛 API，写评论在这里，明文表单无签名
 import { guardedFetch, withTimeout } from './traffic.mjs'
 import { loadCred, cookieHeader } from './cred.mjs'
 
@@ -6,7 +11,8 @@ export const PC = 'https://bbs.3839.com'
 export const MOBILE = 'https://m.bbs.3839.com'
 export const WEB = 'https://www.3839.com'
 
-// 消息中心接口需要带 referer / origin。
+// 消息中心那套 app 网关（/app/hykb_web/api/）比 PC 论坛接口挑剔得多：
+// 少 referer / 少 origin / 用 GET，都会回 {"code":0,"msg":"出错啦~"}，跟 cookie 无关。
 const WEB_HDR = { referer: WEB + '/zone/msg', origin: WEB }
 
 const json = async (res) => {
@@ -57,6 +63,9 @@ export async function msgInfo() {
 /**
  * 「@ 我」通知列表（消息中心的 mode=3 频道）。
  *
+ * 这是全站唯一能拿到「谁 @ 了我」明细的接口 —— 各种 getNotice / getAtMe 的猜测端点
+ * 全部回落成 HTML 首页，只有这个 app 网关是真的。明文表单、无签名、无时间戳。
+ *
  * mode：1 回复我的 / 2 系统通知（此时 ac 要换成 sys_message）/ 3 @我 / 4 赞 / 5 关注。
  * 响应：{code:100, result:{last_id, cursor, data:[…]}}，last_id 与 cursor 都是 -1 表示到底。
  *
@@ -86,6 +95,44 @@ export async function topicPage(topicId) {
   const res = await guardedFetch(PC + '/thread-' + topicId + '.htm', { headers: { cookie: cookieHeader() } }, 'read')
   return res.text()
 }
+
+/* ---------------- 用户中心（关注 / 粉丝 / 关系） ---------------- */
+
+/**
+ * 网页版用户中心接口：www.3839.com/app/hykb_web/api/api_user.php，明文表单 + cookie。
+ * 关注功能在网页端就有（/zone/js/app.js 里的 add_focus_user），不需要 App 网关签名。
+ * write=true 时过写额度闸。
+ */
+export async function userApi(form, { write = false } = {}) {
+  const cred = loadCred()
+  const body = new URLSearchParams(form)
+  const res = await guardedFetch(WEB + '/app/hykb_web/api/api_user.php', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'x-requested-with': 'XMLHttpRequest',
+      cookie: cookieHeader(cred),
+      ...WEB_HDR,
+    },
+    body: body.toString(),
+  }, write ? 'write' : 'read')
+  return json(res)
+}
+
+/** 我的粉丝列表（登录态）。relation：1=无关系，4=存在关注关系（分辨不了方向，别用它判断互关）。 */
+export const fansList2 = ({ page = 1 } = {}) => userApi({ ac: 'fans_user_list2', page: String(page) })
+
+/** 我关注的人（登录态）。判断「有没有回关」只能靠它 —— 他在这个列表里就是已回关。 */
+export const followingList2 = ({ page = 1 } = {}) => userApi({ ac: 'home_kifollowother2', page: String(page) })
+
+/** 我和某人的关系。 */
+export const relationInfo = ({ vuid }) => userApi({ ac: 'get_relation_info', vuid: String(vuid) })
+
+/** 关注某人（回关）。写操作。 */
+export const focusUser = ({ vuid }) => userApi({ ac: 'add_focus_user', vuid: String(vuid) }, { write: true })
+
+/** 取消关注（回关写错时的手动撤销）。写操作。 */
+export const unfocusUser = ({ vuid }) => userApi({ ac: 'cancel_focus_user', vuid: String(vuid) }, { write: true })
 
 /* ---------------- 写入 ---------------- */
 
@@ -134,7 +181,7 @@ export async function commentOperate({ fid, replyId, commentId, content, mask = 
 
 /**
  * 发一篇新帖（文章帖）。
- * 参数：
+ * 参数抄自 PC 发帖页 bbs.3839.com/js/send_thread.js 的 sendThread：
  *   POST index.php?m=api&c=thread&a=setThread（form 编码）
  *   cate=1 发布 / 2 定时 / 3 草稿；type=1 文章帖（需要 cover 字段，空串即可）。
  * content 是编辑器 domToStr 的产物：段落是 <div>…</div>，空行 <div><br></div>，
@@ -201,7 +248,7 @@ export async function qrPoll(qrcode, jar) {
 /**
  * 扫码第二步：拿票。
  * 轮询只会回 result.uid（表示"这个人在手机端确认了"），但 Pauth / Uauth 要再调一次
- * QRcodeAuthCallBack 才下发。
+ * QRcodeAuthCallBack 才下发 —— 页面里 authCallback() 干的就是这件事（login_e1.js:697）。
  * 少了这一步，轮询看起来"成功"，落盘的却是 uid 有、Pauth 空，写操作一律 5001。
  */
 export async function qrAuthCallback(result, jar) {

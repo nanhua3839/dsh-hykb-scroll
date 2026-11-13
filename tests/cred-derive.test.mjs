@@ -5,22 +5,22 @@ import { uidFromPauth, nicknameFromPauth, deriveCred } from '../tools/lib/cred.m
 import { credentialsPath } from '../tools/lib/paths.mjs'
 import plugin from '../lib/index.js'
 
-// Pauth 形状（虚构数据）：uid|nickname|avatar|credential|expires|sign|hmac
-const PAUTH = '10000001|%E6%B5%8B%E8%AF%95%E5%B0%8F%E5%8F%B7|https%3A%2F%2Fexample.com%2Favatar.png|00000000000000000000000000000000|1824988330|1|00000000000000000000000000000000'
+// 真实 Pauth 形状：uid|nickname|avatar|credential|expires|sign|hmac
+const PAUTH = '162319955|nanhua%E7%9A%84%E5%A4%A7%E8%82%A5%E9%B1%BC|https%3A%2F%2Fimga.3839.com%2F162319955%3Ft%3D1793357884|5e4fb40081938e357b834d4a36c323229|1824988330|1|b2c52a03cf4fb845769421733f9cb17d'
 
 test('uid 从 Pauth 第 1 段解出来', () => {
-  assert.equal(uidFromPauth(PAUTH), '10000001')
+  assert.equal(uidFromPauth(PAUTH), '162319955')
   assert.equal(uidFromPauth(''), '')
   assert.equal(uidFromPauth('abc|def'), '', '非纯数字不算 uid')
 })
 
 test('nickname 从 Pauth 第 2 段解出来并解码', () => {
-  assert.equal(nicknameFromPauth(PAUTH), '测试小号')
+  assert.equal(nicknameFromPauth(PAUTH), 'nanhua的大肥鱼')
   assert.equal(nicknameFromPauth('123'), '')
 })
 
 test('昵称里带竖线时按段数差拼回来', () => {
-  // 服务端靠 (总段数 - 7) 判断昵称占了几段
+  // 服务端靠 (总段数 - 7) 判断昵称占了几段（ucenter.js Passport.get）
   const pauth = '42|a|b|http://x|cred|1800000000|1|sign'
   assert.equal(nicknameFromPauth(pauth), 'a|b')
   assert.equal(uidFromPauth(pauth), '42')
@@ -29,8 +29,8 @@ test('昵称里带竖线时按段数差拼回来', () => {
 test('deriveCred 补齐 uid 与 nickname，且不改入参', () => {
   const src = { Pauth: PAUTH }
   const out = deriveCred(src)
-  assert.equal(out.uid, '10000001')
-  assert.equal(out.nickname, '测试小号')
+  assert.equal(out.uid, '162319955')
+  assert.equal(out.nickname, 'nanhua的大肥鱼')
   assert.equal(src.uid, undefined, '入参不应被改写')
   // 已给的字段优先，不被推导覆盖
   const keep = deriveCred({ uid: '999', nickname: '手填', Pauth: PAUTH })
@@ -80,10 +80,10 @@ test('/cookie 只给 Pauth 也能写入，uid/nickname 自动解出', async () =
     assert.equal(res.out.code, 200, '回包：' + res.out.body)
     const j = JSON.parse(res.out.body)
     assert.equal(j.ok, true)
-    assert.equal(j.uid, '10000001')
-    assert.equal(j.nickname, '测试小号')
+    assert.equal(j.uid, '162319955')
+    assert.equal(j.nickname, 'nanhua的大肥鱼')
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
-    assert.equal(saved.uid, '10000001')
+    assert.equal(saved.uid, '162319955')
     assert.equal(saved.Pauth, PAUTH)
   } finally {
     if (backup === null) { try { fs.unlinkSync(file) } catch {} }

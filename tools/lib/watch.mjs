@@ -14,13 +14,80 @@
 // 首次扫描只登记不回复（bootstrap）：否则第一次启动会把历史内容全回一遍。
 import { sectionTopics } from './forum.mjs'
 import { topicDetail, replyOperate, commentOperate, atList } from './hykb-api.mjs'
+import { render, EMOJI_PROMPT_RULE } from './emoji.mjs'
+import { likeTopic, likeReply } from './like.mjs'
 import { makeFilter } from './filter.mjs'
 import { matchTrigger } from './trigger.mjs'
 import { loadSeen, saveSeen, seenReply, markReply, seenPerson, markPerson, audit } from './state.mjs'
 import { loadCred, missingForWrite } from './cred.mjs'
 import { chat, replyPrompt, replySummaryPrompt, applySuffix } from './ai.mjs'
+import { screenInbound, screenOutbound, describeVerdict } from './safety.mjs'
+import { findRepeat, rememberSaid } from './dedupe.mjs'
+import { parseKbTime, kbTimeText } from './timefmt.mjs'
+import { record as recordHistory } from './history.mjs'
 
 const strip = (h) => String(h || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+
+/**
+ * 帖子的四种「身份标记」和三个时间，列表项与详情页字段同名同义：
+ *   is_essence 精华 / is_top 置顶 / is_official 官方发布 / is_article_contribution 长文投稿
+ *   time 发布 / edit_time 修改 / reply_time 最近回复（都是「YYYY-MM-DD HH:MM:SS」字符串）
+ */
+export const flagsOf = (t) => {
+  const o = t || {}
+  return {
+    isEssence: num(o.is_essence) > 0,
+    isTop: num(o.is_top) > 0,
+    isOfficial: num(o.is_official) > 0,
+    isContribution: num(o.is_article_contribution) > 0,
+    publishMs: parseKbTime(o.time),
+    editMs: parseKbTime(o.edit_time),
+    replyMs: parseKbTime(o.reply_time),
+    publishStr: kbTimeText(o.time),
+    editStr: kbTimeText(o.edit_time),
+    replyStr: kbTimeText(o.reply_time),
+  }
+}
+
+/**
+ * 创作/官方内容不回复。三类各有独立开关（默认都开），官方这一类还支持按人放行/强制跳过：
+ *   官方黑名单命中 → 一律不回（优先于白名单）
+ *   官方白名单非空且命中 → 官方内容照常回
+ *   否则官方内容跳过
+ * @returns {string} 空串 = 可以回；非空 = 跳过的原因
+ */
+export function skipRule(cfg, cand) {
+  const S = cfg?.listen?.skip || {}
+  const keys = [cand?.uid, cand?.nickname].map((x) => String(x ?? '').trim().toLowerCase()).filter(Boolean)
+  const hit = (list) => (list || [])
+    .map((x) => String(x ?? '').trim().toLowerCase())
+    .filter(Boolean)
+    .some((v) => keys.includes(v))
+
+  if (cand?.isOfficial) {
+    if (hit(S.officialDeny)) return 'official-deny'
+    const allow = (S.officialAllow || []).filter((x) => String(x ?? '').trim())
+    if (allow.length && hit(S.officialAllow)) return ''       // 白名单里点名的官方号照常回
+    if (S.official !== false) return 'official'
+  }
+  if (cand?.isEssence && S.essence !== false) return 'essence'
+  if (cand?.isContribution && S.contribution !== false) return 'contribution'
+  return ''
+}
+
+/** 浏览记录用的那一份字段（帖 id / 标题 / 板块 / 作者 / 三个时间）。 */
+const histOf = (c) => ({
+  topicId: c.topicId,
+  title: c.topicTitle || c.topic?.title || '',
+  sectionId: c.sectionId,
+  sectionTitle: c.sectionTitle,
+  uid: c.uid,
+  nickname: c.nickname,
+  published: c.publishMs,
+  edited: c.editMs,
+  replied: c.replyMs,
+})
 
 /** keyOf 产出的三类前缀；别的（b:/r:）是刷帖层自己的标记。 */
 const LISTEN_KEY_PREFIX = new Set(['t', 'f', 'c'])
@@ -76,7 +143,8 @@ export async function collect(cfg, { log = () => {} } = {}) {
           topicId: String(t.id), topicTitle: t.title || '',
           uid: String(t.uid), nickname: t.user?.nickname || t.uid,
           content: strip(t.title) + ' ' + strip(t.content),
-          timeStr: t.time_str || '', replyCount: t.reply_count,
+          timeStr: t.time_str || kbTimeText(t.time), replyCount: t.reply_count,
+          ...flagsOf(t),
           raw: t,
         })
       }
@@ -135,6 +203,7 @@ export async function collect(cfg, { log = () => {} } = {}) {
           // 楼层不在第一页时用通知里的富文本兜底，commentOperate 只认 replyId，照样能回
           content: floor?.content || n.to_info || '',
           timeStr: floor?.time_str || n.time || '',
+          ...flagsOf(topic),
           noticeId: String(n.id || ''),
           topic, replies,
         })
@@ -174,6 +243,7 @@ export async function collect(cfg, { log = () => {} } = {}) {
           floorId: String(r.id), position: r.position,
           uid: String(r.uid), nickname: r.user?.nickname || r.uid,
           content: r.content || '', timeStr: r.time_str || '',
+          ...flagsOf(topic),
           topic, replies,
         })
       }
@@ -188,6 +258,7 @@ export async function collect(cfg, { log = () => {} } = {}) {
             floorId: String(r.id), commentId: String(c.id), position: r.position,
             uid: String(c.uid), nickname: c.user?.nickname || c.uid,
             content: c.content || '', timeStr: c.time_str || '',
+            ...flagsOf(topic),
             topic, replies,
           })
         }
@@ -209,6 +280,16 @@ export function evaluate(cfg, cand, me) {
 
   if (!cand.uid || String(cand.uid) === String(me.uid)) return { action: 'skip', why: 'self' }
   if (cand.source === 'atme' && L.atme?.enabled === false) return { action: 'skip', why: 'atme-off' }
+
+  // 创作/官方内容不接话：三类独立开关，官方还能按人放行/强制跳过。
+  // 放在触发判定之前 —— 这类内容连 AI 都不该被叫起来，也省一次模型调用。
+  const skipWhy = skipRule(cfg, cand)
+  if (skipWhy) return { action: 'skip', why: skipWhy }
+
+  // 违禁内容闸（入站）：别人写的正文里命中三类黑名单就当场判死。
+  // 位置很关键 —— 在触发判定和模型调用**之前**，命中就一次 token 都不花。
+  const guard = screenInbound(cand.content, cfg)
+  if (!guard.ok) return { action: 'refuse', why: guard.why, cat: guard.cat }
 
   // 触发条件只有一个：内容里 @ 我。作者是大号不等于叫我，不能凭这个就回。
   // atme 源例外：平台的通知本身就是「有人 @ 了你」，再拿正文匹配一遍反而会被
@@ -255,6 +336,102 @@ export function evaluate(cfg, cand, me) {
   return { action: 'reply', why: 'at', via: trig.via || null }
 }
 
+/**
+ * 回完帖顺手点赞：聊的是楼层就赞那条楼层（like.replies），聊的是主帖就赞这帖（like.browsed）。
+ * 只处理"我刚回复的那一条"，不做整帖扫荡——扫荡的活归刷帖流程（digest 的 runLikes）。
+ */
+async function likeAfterReply(cfg, c, seen, { log = () => {} } = {}) {
+  const LK = cfg.like || {}
+  const jobs = []
+  if (c.kind === 'comment' && c.floorId && LK.replies) {
+    jobs.push({
+      key: 'l:r:' + c.floorId, what: '楼层 ' + c.floorId,
+      run: () => likeReply({ fid: c.sectionId, tid: c.topicId, replyId: c.floorId }),
+    })
+  }
+  if (c.kind === 'topic' && LK.browsed) {
+    jobs.push({ key: 'l:t:' + c.topicId, what: '帖 ' + c.topicId, run: () => likeTopic({ tid: c.topicId }) })
+  }
+  for (const j of jobs) {
+    if (seenReply(seen, j.key)) continue
+    try {
+      const out = await j.run()
+      if (out.code === 100) {
+        markReply(seen, j.key, { liked: true })
+        audit({ action: 'like-' + (j.key.startsWith('l:t:') ? 'topic' : 'reply'), topicId: c.topicId, replyId: c.floorId || null, via: '回帖后顺手赞', ok: true })
+        log('[like] ✓ 赞了' + j.what)
+      } else {
+        log('[like] 没赞成 ' + j.what + '：code=' + out.code + ' ' + (out.msg || ''))
+      }
+    } catch (e) { log('[like] 被拦（多半是写额度/冷却/风控）：' + e.message); break }
+  }
+}
+
+/** 把表情用法接到 system 提示后面；on 为假时原样返回（模型就不会写 [表情:名]）。 */
+function withEmojiRule(msgs, on) {
+  if (!on) return msgs
+  return msgs.map((m, i) => (i === 0 && m.role === 'system' ? { ...m, content: m.content + '\n\n' + EMOJI_PROMPT_RULE } : m))
+}
+
+/**
+ * 违禁内容命中后回的那一句。
+ * 关键：这句话是配置里的死文本，**不经过模型** —— 所以整条链路零 token。
+ * refuseText 留空 = 静默跳过（只记日志，不发任何东西）。
+ * @returns {Promise<boolean>} 是否真的发出去了
+ */
+async function refuseSend(cfg, c, ev, { log = () => {}, dryRun = false } = {}) {
+  const S = cfg?.safety || {}
+  const text = String(S.refuseText || '').trim()
+  const label = describeVerdict({ ok: false, cat: ev.cat, why: ev.why })
+  if (!text) {
+    log('  [safety] 命中' + label + '：话术留空，静默跳过（未调用模型）')
+    return false
+  }
+  if (dryRun) {
+    log('  [safety][dry-run] 命中' + label + ' → 会直发固定话术（不调模型）：「' + text + '」')
+    return false
+  }
+  let out
+  try {
+    if (c.kind === 'topic') out = await replyOperate({ tid: c.topicId, content: text, type: 3, state: 1 })
+    else out = await commentOperate({ fid: c.sectionId, replyId: c.floorId, commentId: 0, content: text })
+  } catch (e) {
+    log('  [safety] 固定话术发送被拦：' + e.message)
+    return false
+  }
+  const ok = out.code === 100
+  if (ok) {
+    log('  ⛔ 命中' + label + '：已回固定话术（未调用模型）')
+    audit({ action: 'refuse', topicId: c.topicId, floorId: c.floorId || null, triggerUid: c.uid, via: ev.why, text, ok: true })
+  } else {
+    log('  ✗ 固定话术没发出去 ' + out.code + ' ' + (out.msg || ''))
+    audit({ action: 'refuse', topicId: c.topicId, floorId: c.floorId || null, ok: false, code: out.code, msg: out.msg })
+  }
+  return ok
+}
+
+/**
+ * 出站闸 + 复读查重，两件事都发生在「模型已经写完、还没发出去」这一格。
+ * @returns {{allow:boolean, why?:string}}
+ */
+function gateOutbound(cfg, text, { log = () => {} } = {}) {
+  const S = cfg.safety || {}
+  if (S.enabled === false) return { allow: true }
+  if (S.blockOutbound !== false) {
+    const v = screenOutbound(text, cfg)
+    if (!v.ok) {
+      log('  [safety] 模型写出' + describeVerdict(v) + '，拦下不发')
+      return { allow: false, why: 'outbound-' + (v.cat || '') }
+    }
+  }
+  const rep = findRepeat({ text, cfg })
+  if (rep) {
+    log('  [dedupe] 这段话' + Math.round((Date.now() - (rep.at || 0)) / 60000) + ' 分钟前说过，不重复发')
+    return { allow: false, why: 'repeat' }
+  }
+  return { allow: true }
+}
+
 /** 在哪些时间窗内允许干活。allDay=true 时永远允许。 */
 export function inWindow(cfg, now = new Date()) {
   const L = cfg.listen || {}
@@ -279,7 +456,7 @@ export function inWindow(cfg, now = new Date()) {
 export async function tick(cfg, { dryRun = false, log = console.log } = {}) {
   const seen = loadSeen()
   const me = { uid: cfg.self?.uid || '', nickname: cfg.self?.name || '' }
-  const stats = { scanned: 0, replied: 0, skipped: 0, bootstrapped: false, blocked: null }
+  const stats = { scanned: 0, replied: 0, skipped: 0, refused: 0, bootstrapped: false, blocked: null }
 
   if (!inWindow(cfg)) { log('[watch] 不在时间窗内，跳过本轮'); return stats }
 
@@ -324,8 +501,23 @@ export async function tick(cfg, { dryRun = false, log = console.log } = {}) {
     if (seenReply(seen, k)) continue
     const ev = evaluate(cfg, c, me)
     if (ev.action === 'skip') {
-      if (!dryRun) markReply(seen, k, { skip: ev.why })
+      if (!dryRun) {
+        markReply(seen, k, { skip: ev.why })
+        recordHistory({ ...histOf(c), action: 'skip', why: ev.why })
+      }
       stats.skipped++
+      continue
+    }
+    // 违禁内容：直接回一句固定话术，**不进模型**。
+    // 这是「识别到违规内容 → 无法生成回复」的那条路：零 token、零思考、零生成。
+    if (ev.action === 'refuse') {
+      const sent = await refuseSend(cfg, c, ev, { log, dryRun })
+      if (!dryRun) {
+        markReply(seen, k, { refuse: ev.why })
+        recordHistory({ ...histOf(c), action: 'refuse', why: ev.why })
+      }
+      if (sent) repliedTopics.add(String(c.topicId))
+      stats.refused++
       continue
     }
     const who = c.nickname || c.uid
@@ -337,11 +529,16 @@ export async function tick(cfg, { dryRun = false, log = console.log } = {}) {
 
     if (cfg.listen.oncePerPerson && seenPerson(seen, c.uid)) {
       log('  [skip] ' + who + ' 冷却期内已回过')
-      if (!dryRun) markReply(seen, k, { skip: 'person-cooldown' })
+      if (!dryRun) {
+        markReply(seen, k, { skip: 'person-cooldown' })
+        recordHistory({ ...histOf(c), action: 'skip', why: 'person-cooldown' })
+      }
       stats.skipped++
       continue
     }
 
+    // 楼中楼（commentOperate）能不能带表情还没实测，默认只让楼层回复带。
+    const canEmoji = cfg.emoji?.enabled !== false && (c.kind === 'topic' || cfg.emoji?.inComment !== false)
     let reply
     try {
       // 对方是让我「总结 / 说说这帖讲了啥」→ 真总结，不是敷衍一句
@@ -353,18 +550,51 @@ export async function tick(cfg, { dryRun = false, log = console.log } = {}) {
         ), { maxTokens: 400, temperature: 0.5 })
         reply = applySuffix(toPostText(reply), { suffix: cfg.prompt?.suffix, max: 900, sep: '\n' })
       } else {
-        reply = await chat(replyPrompt({
+        reply = await chat(withEmojiRule(replyPrompt({
           topic: c.topic || { id: c.topicId, title: c.topicTitle, content: '' },
           floors: c.replies || [],
           trigger: { nickname: who, uid: c.uid },
           persona: cfg.persona,
           triggerText: text,
-        }), { maxTokens: cfg.ai?.maxTokens ? Math.min(300, cfg.ai.maxTokens) : 300 })
+        }), canEmoji), { maxTokens: cfg.ai?.maxTokens ? Math.min(300, cfg.ai.maxTokens) : 300 })
         reply = String(reply || '').replace(/\s+/g, ' ').trim().slice(0, 200)
         reply = applySuffix(reply, { suffix: cfg.prompt?.suffix, max: 200 })
       }
-    } catch (e) { log('  [ai] ' + e.message); continue }
+    } catch (e) {
+      // DeepSeek 官方 safety_check 命中：服务端已经拦了，这里按「命中」处理 ——
+      // 回固定话术（不调模型，零 token），而不是当成普通错误重试/跳过。
+      if (e && e.safetyBlocked) {
+        log('  [safety] DeepSeek 内容审核拒答：' + e.message)
+        const sent = await refuseSend(cfg, c, { cat: 'official', why: 'official-refusal' }, { log, dryRun })
+        if (!dryRun) {
+          markReply(seen, k, { refuse: 'official-refusal' })
+          recordHistory({ ...histOf(c), action: 'refuse', why: 'official-refusal' })
+        }
+        if (sent) repliedTopics.add(String(c.topicId))
+        stats.refused++
+        continue
+      }
+      log('  [ai] ' + e.message)
+      continue
+    }
     if (!reply) { log('  [ai] 空回复，跳过'); continue }
+    // 表情只能在这里拼：上面的 strip / slice / applySuffix 都会把 <kb-emoji …/> 削断或删光。
+    // canEmoji 为假时 max:0 表示「解析出来的 token 一并删掉」，避免把 [表情:x] 原样发出去。
+    if (typeof reply === 'string') reply = render(reply, { max: canEmoji ? 3 : 0 })
+
+    // 出站闸 + 复读查重：模型写完了才查，所以这一步不省 token，但能保证不把脏东西发出去。
+    const gate = gateOutbound(cfg, reply, { log })
+    if (!gate.allow) {
+      // 出站命中（模型自己跑偏）默认不回任何东西；repOnOutbound 打开时回固定话术。
+      const replyOnOut = gate.why !== 'repeat' && (cfg.safety?.replyOnOutbound === true)
+      if (replyOnOut && !dryRun) await refuseSend(cfg, c, { cat: String(gate.why || '').replace('outbound-', ''), why: gate.why }, { log, dryRun })
+      if (!dryRun) {
+        markReply(seen, k, { skip: gate.why })
+        recordHistory({ ...histOf(c), action: 'skip', why: gate.why })
+      }
+      stats.skipped++
+      continue
+    }
 
     if (dryRun) {
       log('  [dry-run] 会回复：' + reply)
@@ -383,15 +613,21 @@ export async function tick(cfg, { dryRun = false, log = console.log } = {}) {
     if (out.code === 100) {
       log('  ✓ 已回复：' + reply)
       audit({ action: 'auto-' + c.kind, topicId: c.topicId, floorId: c.floorId || null, triggerUid: c.uid, via: ev.why, text: reply, ok: true })
+      try { rememberSaid({ text: reply }) } catch {}
       markReply(seen, k, { replied: true })
+      recordHistory({ ...histOf(c), action: 'reply', why: ev.why })
       repliedTopics.add(String(c.topicId))
       markPerson(seen, c.uid, { nickname: who })
       saveSeen(seen)
       stats.replied++
+      // 自动点赞：我刚回过谁，就把那条内容赞一下（回楼层赞楼层、回主帖赞主帖）。
+      // 写额度与冷却仍由 traffic.mjs 兜；同一对象只赞一次（seen 留痕 + 平台 is_up_voted）。
+      if (!dryRun) await likeAfterReply(cfg, c, seen, { log })
     } else {
       log('  ✗ ' + out.code + ' ' + (out.msg || ''))
       audit({ action: 'auto-' + c.kind, topicId: c.topicId, floorId: c.floorId || null, ok: false, code: out.code, msg: out.msg })
       markReply(seen, k, { fail: out.code })
+      recordHistory({ ...histOf(c), action: 'skip', why: 'fail-' + out.code })
     }
   }
 

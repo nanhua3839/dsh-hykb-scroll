@@ -2,9 +2,10 @@
  * @ 触发识别。两层判据，CLI 与宿主插件共用同一份，避免两边漂移。
  *
  * a) 富文本：正文里的 <kb-contact data-id="<uid>"> 标签。
- *    服务端会解析这个标签并校验好友关系，非好友整条发送被拒。
+ *    服务端会解析这个标签并校验好友关系，非好友整条发送被拒（code 8112）。
  *    所以这条路径只在双方已互为好友时可用。
  * b) 纯文本：正文里出现「@昵称」。不走好友校验，任何号都能发得出去。
+ *    实测回复内容原样保存为 "@nanhua 纯文本触发测试"，服务端不做标签化。
  */
 
 /** kb-contact 的 data-id 属性有三种引号写法，都要覆盖。 */
@@ -17,15 +18,15 @@ function hasRichTag(content, uid) {
     || content.includes('data-id=' + id + '/')
 }
 
-/** @昵称 需要防止被更长昵称前缀命中：@tester2 不该算 @tester。 */
+/** @昵称 需要防止被更长昵称前缀命中：@nanhua2 不该算 @nanhua。 */
 function hasPlainTag(content, nickname) {
   if (!nickname) return false
   const tag = '@' + nickname
   let at = content.indexOf(tag)
   while (at !== -1) {
     const next = content.charAt(at + tag.length)
-    // 只有紧跟 ASCII 字母/数字/下划线才算同一个人名字的延续（@tester2 ≠ @tester）。
-    // 中文一律视为分隔符：@tester在吗 是叫我；中文昵称「小明」也不会被「@小明明」误判，
+    // 只有紧跟 ASCII 字母/数字/下划线才算同一个人名字的延续（@nanhua2 ≠ @nanhua）。
+    // 中文一律视为分隔符：@nanhua在吗 是叫我；中文昵称「小明」也不会被「@小明明」误判，
     // 因为中文昵称本身没有可靠的词边界，宁可多回一条也不漏回。
     if (!/[0-9A-Za-z_]/.test(next)) return true
     at = content.indexOf(tag, at + 1)

@@ -1,14 +1,22 @@
-// 刷帖层：把「板块流」变成一份可排序的候选池 + 一份日报。
+// 刷帖层（**旧版，保留兼容**）：把「板块流」变成一份可排序的候选池 + 一份日报。
+//
+// ⚠️ 日报链路已经不走这里了：
+//   抓取改用 daypool.mjs（按天增量补到当天 0 点，保证「今天全量」而不是「前几页抽样」），
+//   打分改用 rank.mjs（四维池内分位数），
+//   日报渲染改用 ground.mjs（代码写事实、模型只写软文字并逐句校验）。
+// 这里的 gather / score / rank / fallbackDigest 只给老调用方和 tests/browse.test.mjs 留着，
+// 新代码别再用；score/rank 的线性叠加口径与 rank.mjs 完全不是一回事。
 //
 // 与 watch.mjs 的分工：
 //   watch  = 被动的（有人 @ 我 / 大号发帖 → 回一句）
 //   browse = 主动的（自己逛板块 → 选题 → 读帖 → 写日报 → 可选回帖）
 //
-// 数据来源：
+// 数据来源只有一条（见 forum.mjs 顶部实测结论）：
 //   sectionTopics(sectionId,{lastId,cursor}) —— 翻页靠上一页返回的 last_id + cursor 成对回传。
 import { sectionTopics, sectionCatalog } from './forum.mjs'
 import { makeFilter } from './filter.mjs'
 import { loadSeen, saveSeen, seenReply, markReply } from './state.mjs'
+import { parseKbTime, kbTimeText } from './timefmt.mjs'
 
 const strip = (h) => String(h || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
@@ -36,12 +44,27 @@ function visible(t) {
   return true
 }
 
-/** 帖子时间可能是秒也可能是毫秒，统一成毫秒；认不出来就当 0（不给新鲜度加分）。 */
-function timeMs(t) {
-  const raw = Number(t.time ?? 0)
-  if (!raw) return 0
-  return raw < 1e12 ? raw * 1000 : raw
+/**
+ * 帖子时间：平台给的是「YYYY-MM-DD HH:MM:SS」字符串（不是时间戳）。
+ * 老写法 Number(t.time) 得 NaN → 永远返回 0，新鲜度加分等于不存在；现在两种都认。
+ */
+export function timeMs(t, field = 'time') {
+  const raw = t?.[field]
+  if (raw == null) return 0
+  const asNum = Number(raw)
+  if (Number.isFinite(asNum) && asNum > 0) return asNum < 1e12 ? asNum * 1000 : asNum
+  return parseKbTime(raw)
 }
+
+/** 列表/详情里三个时间：发布 / 修改 / 最近回复。接口字段直接给，不用自己算。 */
+const timesOf = (t) => ({
+  timeMs: timeMs(t, 'time'),
+  editMs: timeMs(t, 'edit_time'),
+  replyMs: timeMs(t, 'reply_time'),
+  timeStr: kbTimeText(t?.time),
+  editStr: kbTimeText(t?.edit_time),
+  replyStr: kbTimeText(t?.reply_time),
+})
 
 /**
  * 要扫哪些板块。用户没填就自己挑：推荐论坛里讨论数最高的前 N 个。
@@ -116,8 +139,10 @@ export async function gather(cfg, { log = () => {} } = {}) {
           views: num(t.views),
           isEssence: num(t.is_essence) > 0,
           isTop: num(t.is_top) > 0,
-          timeMs: timeMs(t),
-          timeStr: t.time_str || '',
+          isOfficial: num(t.is_official) > 0,
+          isContribution: num(t.is_article_contribution) > 0,
+          ...timesOf(t),
+          timeStr: t.time_str || kbTimeText(t.time),
         })
       }
       const nextLast = j.result?.last_id, nextCur = j.result?.cursor

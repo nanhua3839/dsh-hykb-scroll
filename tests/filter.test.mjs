@@ -13,7 +13,7 @@ test('空名单全部放行', () => {
   const f = makeFilter({})
   assert.equal(f.user('1', '甲').ok, true)
   assert.equal(f.forum('23064', '爆友生活区').ok, true)
-  assert.equal(f.topic('1000001').ok, true)
+  assert.equal(f.topic('9251547').ok, true)
 })
 
 test('黑名单优先于白名单', () => {
@@ -31,8 +31,8 @@ test('白名单非空但没命中就拒', () => {
 })
 
 test('uid 和昵称都参与匹配', () => {
-  const f = makeFilter({ denyUsers: ['10000002'] })
-  assert.equal(f.user('10000002', '随便什么名').ok, false)
+  const f = makeFilter({ denyUsers: ['41227777'] })
+  assert.equal(f.user('41227777', '随便什么名').ok, false)
   assert.equal(f.user('999', '随便什么名').ok, true)
 })
 
@@ -45,8 +45,8 @@ test('板块认 id 也认板块名', () => {
 })
 
 test('帖子认 id 也认链接形式', () => {
-  const f = makeFilter({ denyTopics: ['1000001'] })
-  assert.equal(f.topic('1000001').ok, false)
-  assert.equal(f.topic('https://m.bbs.3839.com/post-1000001.htm').ok, false)
-  assert.equal(f.topic('1000002').ok, true)
+  const f = makeFilter({ denyTopics: ['9251547'] })
+  assert.equal(f.topic('9251547').ok, false)
+  assert.equal(f.topic('https://m.bbs.3839.com/post-9251547.htm').ok, false)
+  assert.equal(f.topic('9251548').ok, true)
 })

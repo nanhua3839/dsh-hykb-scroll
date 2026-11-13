@@ -20,17 +20,17 @@ function fakeController() {
 test('session-delivery 首次投递前建会话，之后复用同一个', async () => {
   const home = tmpHome()
   const c = fakeController()
-  const d = createSessionDelivery({ controller: c, dshHome: home, cwd: home, sessionId: 'hykb-whale' })
-  assert.equal(d.sessionId, 'hykb-whale')
+  const d = createSessionDelivery({ controller: c, dshHome: home, cwd: home, sessionId: 'hykb-scroll' })
+  assert.equal(d.sessionId, 'hykb-scroll')
   await d.send({ mode: 'queue', content: [{ type: 'text', text: '第一段' }] })
   await d.send({ mode: 'queue', content: [{ type: 'text', text: '第二段' }] })
   assert.equal(c.calls.create.length, 1, '只该建一次会话')
   assert.equal(c.calls.prompt.length, 2)
-  assert.equal(c.calls.prompt[0].sessionId, 'hykb-whale')
+  assert.equal(c.calls.prompt[0].sessionId, 'hykb-scroll')
   assert.equal(c.calls.prompt[0].content[0].text, '第一段')
   // 状态落盘，重启后沿用同一个会话 id
   const saved = JSON.parse(fs.readFileSync(path.join(home, 'hykb-session.json'), 'utf8'))
-  assert.equal(saved.id, 'hykb-whale')
+  assert.equal(saved.id, 'hykb-scroll')
   assert.ok(saved.deliveredAt > 0)
 })
 
@@ -86,7 +86,7 @@ test('browse-clock 关掉时不刷、不开时不叫醒', async () => {
 
 test('browse-clock 开起来后跑一轮并叫醒会话', async () => {
   const home = tmpHome()
-  const cfg = { browse: { enabled: true, allDay: true, intervalSec: 300, wake: true, sessionId: 'hykb-whale' }, persona: { name: '小号', ownerTitle: '主人' } }
+  const cfg = { browse: { enabled: true, allDay: true, intervalSec: 300, wake: true, sessionId: 'hykb-scroll' }, persona: { name: '小号', ownerTitle: '主人' } }
   const c = fakeController()
   const clock = startBrowseClock({ sessionController: c, get: () => undefined }, {
     dshHome: home, cwd: home,

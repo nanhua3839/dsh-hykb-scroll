@@ -47,7 +47,7 @@ const postReq = (body, headers = LOOPBACK) => {
 const find = (routes, suffix) => routes.find((x) => String(x.path || x.pathname).endsWith(suffix))
 
 test('plugin 导出声明完整', () => {
-  assert.equal(plugin.name, 'dsh-hykb-whale')
+  assert.equal(plugin.name, 'dsh-hykb-scroll')
   assert.ok(Array.isArray(plugin.inject))
   assert.ok(plugin.inject.includes('webServer'))
   assert.equal(typeof plugin.apply, 'function')
