@@ -16,6 +16,7 @@ fs.writeFileSync(process.env.HYKB_SCROLL_CONFIG, JSON.stringify({ risk: { writeG
 
 const { toThreadHtml, postMarkdown, postTitle, publishDigest, loadPostLog, TITLE_MAX } = await import('../tools/lib/post.mjs')
 const { applySuffix, threadUrl } = await import('../tools/lib/ai.mjs')
+const { resolveSuffix } = await import('../tools/lib/config.mjs')
 
 const picks = [{ topicId: '111', title: 'A 帖' }, { topicId: '222', title: 'B 帖' }, { topicId: '333', title: 'C 帖' }]
 const baseCfg = (post = {}, prompt = {}) => ({
@@ -49,8 +50,21 @@ test('固定后缀：程序追加、去掉模型自己写的重复、截断时�
   const long = applySuffix('字'.repeat(300), { suffix: '内容由AI生成', max: 200 })
   assert.ok(long.length <= 200, '超长了：' + long.length)
   assert.ok(long.endsWith('内容由AI生成'))
-  assert.equal(applySuffix('你好', { suffix: '' }), '你好')
+  // 留空 ≠ 不加：AI 生成的内容必须带标识，这一条不给关，空着就强制用默认值。
+  assert.equal(applySuffix('你好', { suffix: '' }), '你好 -内容由AI生成')
+  assert.equal(applySuffix('你好', {}), '你好 -内容由AI生成')
   assert.match(postMarkdown('正文', picks, baseCfg({}, { suffix: '内容由AI生成' })), /\n\n内容由AI生成$/)
+})
+
+test('后缀只允许常见标点 / 汉字 / 英文 / 数字，其余字符被清掉', () => {
+  assert.equal(resolveSuffix({ prompt: { suffix: '★☆内容由AI生成★' } }), '内容由AI生成')
+  assert.equal(resolveSuffix({ prompt: { suffix: '\u200b内容由AI生成' } }), '内容由AI生成')
+  assert.equal(resolveSuffix({ prompt: { suffix: '内容\n由AI生成\ttab' } }), '内容 由AI生成 tab')
+  assert.equal(resolveSuffix({ prompt: { suffix: '-内容由AI生成' } }), '-内容由AI生成')
+  // 允许":常见标点
+  assert.equal(resolveSuffix({ prompt: { suffix: '内容由AI生成。' } }), '内容由AI生成。')
+  // 全空白 = 没填 → 回落默认值，而不是变成空后缀
+  assert.equal(resolveSuffix({ prompt: { suffix: '   ' } }), '-内容由AI生成')
 })
 
 test('标题模板替换日期并按平台上限截断', () => {
