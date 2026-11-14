@@ -1,3 +1,6 @@
 node_modules/
 _facts/
 *.log
+
+# bash 路径展开事故留下的临时目录（曾误提交过快爆账号凭证），永久忽略
+Users`*
