@@ -66,6 +66,39 @@ export function widen(cfg) {
   P.enabled = true
   P.minPicks = 1
 
+  // ⑦ 后加的那几块也必须跟着放宽 —— 漏一块，就是「测试模式里这块还是关着的」。
+  const K = (c.like = c.like || {})
+  K.browsed = true
+  K.quality = true
+  K.replies = true
+  K.perRoundMax = Math.max(5, Number(K.perRoundMax) || 0)
+  K.qualityMinScore = 0
+  K.aiConfirmMax = Math.max(3, Number(K.aiConfirmMax) || 0)
+  K.hotCommentsPerTopic = Math.max(2, Number(K.hotCommentsPerTopic) || 0)
+
+  const F = (c.followback = c.followback || {})
+  F.enabled = true
+  F.onlyNonMutual = false
+  F.dailyCap = Math.max(20, Number(F.dailyCap) || 0)
+  F.maxPages = Math.max(3, Number(F.maxPages) || 0)
+
+  const G = (c.games = c.games || {})
+  G.pick = Math.max(3, Number(G.pick) || 0)
+  G.minLen = 0
+  G.maxComments = Math.max(20, Number(G.maxComments) || 0)
+
+  const SM = (c.summary = c.summary || {})
+  SM.maxComments = Math.max(50, Number(SM.maxComments) || 0)
+
+  // ⑧ 题材偏好不参与打分：测试时别把「她不爱看」的帖子提前筛掉
+  const I = (c.browse.interests = c.browse.interests || {})
+  I.weight = 0
+
+  // ⑨ 判官四条线全部降到 0：测试时让候选都进得来，阈值本身仍由代码判
+  const AI = (c.ai = c.ai || {})
+  const J = (AI.judge = AI.judge || {})
+  J.thresholds = { ...(J.thresholds || {}), like: 0, reply: 0, publish: 0, report: 0 }
+
   c.test = { ...(c.test || {}), enabled: isTestMode(cfg), widened: true }
   return c
 }

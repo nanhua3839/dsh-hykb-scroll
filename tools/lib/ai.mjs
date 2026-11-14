@@ -88,6 +88,42 @@ export function aiReadyAny(cfg = config()) {
   return lines(cfg).length > 0
 }
 
+/**
+ * 拉模型清单：GET {baseUrl}/models（OpenAI 兼容）。
+ * 只给设置页点选用，不进回复链路；拿不到就抛错，不猜模型名。
+ */
+export async function listModels({ baseUrl, apiKey, timeoutMs = 8000 } = {}) {
+  const b = String(baseUrl || '').trim().replace(/\/+$/, '')
+  if (!b) throw new Error('先填接口地址')
+  aiEndpoint(b)
+  const key = String(apiKey || '').trim()
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null
+  try {
+    const res = await fetch(b + '/models', {
+      method: 'GET',
+      headers: key ? { authorization: 'Bearer ' + key } : {},
+      ...(ctrl ? { signal: ctrl.signal } : {}),
+    })
+    const text = await res.text()
+    let data
+    try { data = JSON.parse(text) } catch { throw new Error('返回不是 JSON：' + text.slice(0, 160)) }
+    if (!res.ok) {
+      const why = data && data.error && (data.error.message || data.error) || text.slice(0, 160)
+      throw new Error('HTTP ' + res.status + '：' + String(why))
+    }
+    const rows = Array.isArray(data && data.data) ? data.data
+      : Array.isArray(data && data.models) ? data.models : []
+    const ids = rows
+      .map((m) => String((m && (m.id || m.name)) || m || '').trim())
+      .filter(Boolean)
+    return [...new Set(ids)].sort()
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('拉取超时（' + Math.round(timeoutMs / 1000) + ' 秒）')
+    throw e
+  } finally { if (timer) clearTimeout(timer) }
+}
+
 export async function chat(messages, { temperature, maxTokens, cfg = config() } = {}) {
   const L = lines(cfg)
   if (!L.length) throw new Error(emptyReason(cfg))
