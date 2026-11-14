@@ -59,7 +59,13 @@ const postReq = (body, headers = LOOPBACK) => {
   r.method = 'POST'
   return r
 }
-const find = (routes, suffix) => routes.find((x) => String(x.path || x.pathname).endsWith(suffix))
+// 账号条上线后多了 /cloud/logout、/cloud/sync 这些同后缀路由：先按全路径精确匹配，
+// 匹配不到再退回后缀匹配（后缀匹配会命中 /dsh-hykb/api/cloud + suffix）。
+const find = (routes, suffix) => {
+  const want = '/dsh-hykb/api' + suffix
+  const exact = routes.find((x) => String(x.path || x.pathname) === want)
+  return exact || routes.find((x) => String(x.path || x.pathname).endsWith(suffix))
+}
 
 
 const trusted = () => {
