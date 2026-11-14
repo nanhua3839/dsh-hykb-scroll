@@ -32,16 +32,17 @@ globalThis.fetch = async (url, opt = {}) => {
   const reply = (obj) => ({ ok: true, status: 200, json: async () => obj })
   if (p === '/login') return reply({ ok: true, username: 'probe_user', token: 'tok-1' })
   if (p === '/plugin/state' && (opt.method || 'GET') === 'POST') {
+    // 云侧存 kv 用条目数组（字段名不能带点）
     let applied = 0
-    for (const [k, cell] of Object.entries(body.kv || {})) {
-      if (!stateKv[k] || Number(cell.t) > Number(stateKv[k].t)) { stateKv[k] = cell; applied += 1 }
+    for (const cell of (body.kv || [])) {
+      if (!stateKv[cell.p] || Number(cell.t) > Number(stateKv[cell.p].t)) { stateKv[cell.p] = cell; applied += 1 }
     }
     return reply({ ok: true, now: Date.now(), applied })
   }
   if (p === '/plugin/state') {
     const since = Number(u.searchParams.get('since') || 0)
-    const kv = {}
-    for (const [k, cell] of Object.entries(stateKv)) if (!since || Number(cell.t) > since) kv[k] = cell
+    const kv = []
+    for (const cell of Object.values(stateKv)) if (!since || Number(cell.t) > since) kv.push(cell)
     return reply({ ok: true, now: Date.now(), kv })
   }
   if (p === '/plugin/lease') {
@@ -109,8 +110,8 @@ test('手动同步 push：把本地配置推到云端，且不推密钥', async 
 
 test('手动同步 pull：远端改动落回本地配置', async () => {
   // 造一个「另一台机器」的改动：更新的 t，值不同
-  stateKv['cfg.listen.enabled'] = { v: true, t: Date.now() + 1000 }
-  stateKv['cfg.browse.perDay'] = { v: 9, t: Date.now() + 1000 }
+  stateKv['cfg.listen.enabled'] = { p: 'cfg.listen.enabled', v: true, t: Date.now() + 1000 }
+  stateKv['cfg.browse.perDay'] = { p: 'cfg.browse.perDay', v: 9, t: Date.now() + 1000 }
   const r = await call('/dsh-hykb/api/cloud/sync', { method: 'POST', body: { direction: 'pull' } })
   assert.equal(r.code, 200)
   assert.match(r.json.summary, /已下载/)

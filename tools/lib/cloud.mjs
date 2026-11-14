@@ -141,6 +141,25 @@ export function diffPaths(prev, next) {
   return out
 }
 
+/** 云侧把 kv 存成条目数组（字段名不能带点，CloudBase 会把点展开成嵌套对象）；这里统一回对象形态。 */
+export function normalizeKv(input) {
+  const out = {}
+  if (Array.isArray(input)) {
+    for (const e of input) {
+      if (!isObj(e) || !String(e.p || '').trim()) continue
+      out[String(e.p)] = { v: e.v === undefined ? null : e.v, t: Number(e.t) || 0 }
+    }
+    return out
+  }
+  if (isObj(input)) {
+    for (const [p, c] of Object.entries(input)) {
+      if (!isObj(c)) continue
+      out[p] = { v: c.v === undefined ? null : c.v, t: Number(c.t) || 0 }
+    }
+  }
+  return out
+}
+
 const writeJsonFile = (file, value) => {
   ensureDir(path.dirname(file))
   const tmp = file + '.' + process.pid + '.tmp'
@@ -174,7 +193,8 @@ function personaCatalogPatch(next) {
 }
 
 /** 把远端 KV 落到磁盘。只写给出的路径，本地其它内容（含密钥文件）一个字节都不动。 */
-export function applyKV(kv) {
+export function applyKV(rawKv) {
+  const kv = normalizeKv(rawKv)
   const cfgLeaves = []
   const acctMeta = {}
   const personaMeta = {}
@@ -255,9 +275,10 @@ export async function pushKv(kv) {
   const a = readAccount()
   if (!a.username || !a.token) throw new Error('还没登录快爆Pro账号')
   if (!isObj(kv) || !Object.keys(kv).length) return { now: Date.now(), applied: 0 }
-  const size = Buffer.byteLength(JSON.stringify(kv), 'utf8')
+  const entries = Object.entries(kv).map(([p, c]) => ({ p, v: isObj(c) ? c.v : c, t: Number(isObj(c) ? c.t : 0) || 0 }))
+  const size = Buffer.byteLength(JSON.stringify(entries), 'utf8')
   if (size > CLOUD.maxBytes) throw new Error('本次改动太大（' + Math.round(size / 1024) + 'KB），超出云端 480KB 上限')
-  const data = await apiCall('/plugin/state', { method: 'POST', token: a.token, body: { kv, clientUpdatedAt: Date.now() } })
+  const data = await apiCall('/plugin/state', { method: 'POST', token: a.token, body: { kv: entries, clientUpdatedAt: Date.now() } })
   writeAccount({ ...a, lastSyncAt: Date.now(), lastSyncDir: 'push', cloudUpdatedAt: Number(data.now) || Date.now() })
   return { now: Number(data.now) || Date.now(), applied: Number(data.applied) || 0 }
 }
@@ -272,7 +293,7 @@ export async function pullAll(since = 0) {
   const a = readAccount()
   if (!a.username || !a.token) throw new Error('还没登录快爆Pro账号')
   const data = await apiCall('/plugin/state?since=' + Math.max(0, Number(since) || 0), { token: a.token })
-  const kv = isObj(data.kv) ? data.kv : {}
+  const kv = normalizeKv(data.kv)
   if (Object.keys(kv).length) applyKV(kv)
   writeAccount({ ...a, lastSyncAt: Date.now(), lastSyncDir: 'pull', cloudUpdatedAt: Number(data.now) || Date.now() })
   let maxT = Number(since) || 0

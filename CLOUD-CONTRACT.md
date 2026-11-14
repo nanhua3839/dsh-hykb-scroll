@@ -16,15 +16,19 @@
 ### 1.1 字段级 KV（`nh_plugin_state`，每 username 一条）
 
 ```
-GET  /plugin/state?since=<ms>      (Bearer) → {ok:true, now:<ms>, kv:{ "<path>": {v, t} }}
+GET  /plugin/state?since=<ms>      (Bearer) → {ok:true, now:<ms>, kv:[ {p, v, t} ]}
     · 只回 t > since 的键；since=0（或缺省）回全部
-POST /plugin/state                 (Bearer) {kv:{ "<path>": {v, t} }} → {ok:true, now:<ms>, applied:<n>}
+POST /plugin/state                 (Bearer) {kv:[ {p, v, t} ]} → {ok:true, now:<ms>, applied:<n>}
     · 逐键合并：库里没有该键，或 t > 库里 t → 覆盖；否则忽略（不报错）
-    · 合并后整份 data 的 JSON 长度 >512KB → 400「数据过大」；kv 不是对象 → 400「参数不合法」
+    · 合并后整份 kv 的 JSON 长度 >512KB → 400「数据过大」；kv 缺失/不可解析 → 400「参数不合法」
+    · p 是 §2 的路径字符串（带点），但**存成条目数组**：CloudBase NoSQL 会把带点的字段名
+      展开成嵌套对象（{"cfg.a.b": …} → {cfg:{a:{b:…}}}），所以路径绝不能当文档字段名用
 ```
 
 ```
-nh_plugin_state(username, schema_version, kv:{"<path>":{v,t}}, lease:{owner,device,until}, updated_at)
+nh_plugin_state(username, schema_version, kv:[{p,v,t}], lease_owner, lease_device, lease_name, lease_until, updated_at)
+    · 租约存成**顶层标量** lease_* 而不是嵌套对象：NoSQL 适配器会把嵌套对象展开成 $set 点路径，
+      旧值恰为 null 时 "lease.device" 会写失败（Cannot create field 'device' in element {lease: null}）
 ```
 
 ### 1.2 主备租约（同一文档的 `lease` 字段）
