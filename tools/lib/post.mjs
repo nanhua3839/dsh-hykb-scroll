@@ -138,7 +138,7 @@ export async function publishDigest({ body, picks, cfg, date, dryRun = false, fo
   if (miss.length) return { status: 'failed', reason: '登录态不能发帖：缺 ' + miss.join('、'), title, section: sec }
 
   let out
-  try { out = await setThread({ fid: sec.id, title, content: html }) }
+  try { out = await setThread({ fid: sec.id, title, content: html, mask: cfg?.safety?.forceMask !== false ? 1 : 0 }) }
   catch (e) {
     log('[post] 发帖被拦：' + e.message)
     audit({ action: 'post', fid: sec.id, title, ok: false, msg: e.message })

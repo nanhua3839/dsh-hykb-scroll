@@ -376,6 +376,7 @@ if (!isNotice && (L.at.items || []).length && !L.at.items.some((x) => String(x.i
 | **内容安全（入站）** | `safety.enabled` 且 `safety.blockInbound`，且正文命中三类词之一 | 不接话或回固定话术，**不调模型**（零 token）；浏览记录写 `why=inbound-sexual` 这类 | `watch.mjs` 的 `evaluate()`，判定在触发词之前 |
 | **内容安全（出站）** | `safety.blockOutbound`，模型写出来的话命中三类词 | 整条不发；`why=outbound-xxx` | `watch.mjs` 的 `gateOutbound()`（`digest.mjs` 里同一套） |
 | **平台词表预检** | `safety.maskword.enabled` 且总闸开着，且出站闸已放行；请求快爆自己的敏感词接口 | 整条不发；`why=platform-word`。没配 appid / 密钥时这一步自动跳过 | `watch.mjs` / `digest.mjs` 里的 `maskwordGate()`（`maskword.mjs`） |
+| **敏感词强制发布** | `safety.forceMask`（默认开） | 写接口带 `mask=1`：平台不再弹二次确认，命中的词在帖子里显示成星号；关掉 = 回到 `mask=0`，命中即停在 `code=8111` | `hykb-api.mjs` 的 `setThread()` / `replyOperate()` / `commentOperate()`，调用点在 `post.mjs` / `watch.mjs` / `digest.mjs` |
 | **复读查重** | 同一句 / 相似度 ≥ `risk.dedupeSimilar` 的话在 `risk.dedupeDays` 天内发过 | 不发，`why=repeat` | `dedupe.mjs` 的 `findRepeat()` |
 | **破甲拦截（保存时）** | 提示词 / 人设里出现破甲话术，或 AI 线路的模型名 / 地址 / 站名命中破甲特征 | **保存直接 400 拒绝**，页面显示命中了什么 | `lib/index.js` 的 `/settings` POST 与 `/persona` |
 

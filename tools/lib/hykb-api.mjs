@@ -189,14 +189,14 @@ export async function commentOperate({ fid, replyId, commentId, content, mask = 
  * 返回码：100 成功 / 8111 敏感词 / 99 活动关键词 / 8156 活动设置敏感词 / 5003 账号在别的设备登录。
  * 成功时不回帖子 id（前端是跳回板块页），所以调用方只能拿到 code + msg。
  */
-export async function setThread({ fid, title, content, cate = 1 }) {
+export async function setThread({ fid, title, content, cate = 1, mask = 0 }) {
   const cred = loadCred()
   const body = new URLSearchParams({
     type: '1', fid: String(fid), tid: '0', sid: '0', did: '0',
     title: String(title || ''), content: String(content || ''),
     is_comment: '1', only_myself_status: '0', is_top: '0', top_tag: '0', top_topic_end_time: '',
     is_timing: '0', is_pgc_push: '0', is_talking_point: '0', pubtime: '',
-    p_sub_id: '0', c_sub_id: '0', mask: '0', save_confirm: '0',
+    p_sub_id: '0', c_sub_id: '0', mask: String(mask), save_confirm: '0',
     is_huodong: '0', is_huodong_topic: '0', is_ignore_huodong_check: '0',
     kb_fast_news_status: '0', kb_fast_news_abstract: '', is_repost: '0', repost_desc: '',
     cover: '', cate: String(cate),

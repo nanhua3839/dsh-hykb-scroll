@@ -444,7 +444,7 @@ export async function runDigest(cfg, { dryRun = false, log = () => {}, now = new
         continue
       }
       let out
-      try { out = await replyOperate({ tid: p.topicId, content: text, type: 3, state: 1 }) }
+      try { out = await replyOperate({ tid: p.topicId, content: text, type: 3, state: 1, mask: cfg?.safety?.forceMask !== false ? 1 : 0 }) }
       catch (e) { log('[digest] 回帖被拦 ' + p.topicId + '：' + e.message); audit({ action: 'browse-reply', topicId: p.topicId, ok: false, msg: e.message }); continue }
       if (out.code === 100) {
         log('[digest] ✓ 回了 ' + p.topicId + '：' + text)

@@ -24,7 +24,18 @@
 | 账号 | 自己的账号体系（注册 / 密码登录 / 手机扫码登录），跑在腾讯云函数 `nanhua-api` 上。**此账号与快爆官方无关。** |
 | 多端同步 | 两台机器同登一个账号：改任意设置项、人设、AI 线路（不含密钥）或快爆登录态，另一台 ≤15s 自动跟随。字段级后写覆盖，冲突按时间戳解决。 |
 | 主备租约 | 两台都开着时只有一台真跑（回帖 / 刷帖），另一台显示「待命 · 另一台在跑」；主设备 90s 内不再心跳，备机自动接管。备机上手动触发运行会被拒绝。 |
-| 扫码登录 | 插件出二维码 → 手机相机扫 → 打开确认页登录一次 → 插件自动登录（码 5 分钟、单次有效）。 |
+| 扫码登录 | 插件出二维码 → 手机相机扫 → 打开确认页登录一次 → 插件自动登录（码 5 分钟、单次有效）。确认页会写明「登到哪台设备」和剩余时间，账号会记在这台手机的下次填。 |
+
+### 双重扫码（登录卡）
+
+「登录账号」卡里的扫码区并排两个码，扫哪个都行：
+
+| 码 | 扫它拿到什么 | 走哪条链 |
+|---|---|---|
+| 手机相机扫 | 快爆Pro账号（云同步那个账号） | `POST /cloud/qr/start` → 手机打开 `/plugin/link?code=…` 确认 → `POST /cloud/qr/poll` 轮询到 `ok`，顶部账号条自动刷新 |
+| 好游快爆 App 扫 | 回帖 / 发帖用的小号登录态 | `POST /auth/qr/start` → 快爆官方扫码接口 → `POST /auth/qr/poll` 换凭据落盘 |
+
+两个码互不影响：可以只登一个，也可以都登。
 
 **上云什么、不上云什么**（载荷 schema 见 [CLOUD-CONTRACT.md](./CLOUD-CONTRACT.md)）：
 
@@ -94,8 +105,8 @@ node tools/hykb.mjs digest           # 真跑：写日报 +（可选）对高分
 | 用途 | 方法 |
 | --- | --- |
 | 读帖 + 楼层 + 楼中楼 | `GET m.bbs.3839.com/wap.php?m=topic&ac=detail&v=1.1&topic_id=<id>&sort=2&app_version=413` |
-| 发主回复 | `POST bbs.3839.com/index.php?m=api&c=thread&a=replyOperate` `{tid,content,replyId:0,type:3,state:1,mask:0}` |
-| 发楼中楼 | `POST ...a=commentOperate` `{fid,replyId,commentId:0,content,type:2,extra_comment:1,mask:0}` |
+| 发主回复 | `POST bbs.3839.com/index.php?m=api&c=thread&a=replyOperate` `{tid,content,replyId:0,type:3,state:1,mask:0\|1}` |
+| 发楼中楼 | `POST ...a=commentOperate` `{fid,replyId,commentId:0,content,type:2,extra_comment:1,mask:0\|1}` |
 | 删自己楼层 | `POST ...a=replyOperate` `{tid,replyId:<id>,type:4,state:1}` |
 | 登录态探针 | `GET ...a=getMsgInfo` → `code:100` 即已登录 |
 | 扫码建码 | `POST www.3839.com/user/index.php?ac=QRcodeCreate&appId=web` → `result.qrcode` |
@@ -111,6 +122,7 @@ node tools/hykb.mjs digest           # 真跑：写日报 +（可选）对高分
 - PC 的 `a=getReplyList` / `a=getCommentList` 一律 `code:403`，`data.encryptString` 是 base64 的 IP 水印 → IP 级风控，读只能走移动版。
 - 楼中楼一次只回前 3 条，翻页参数全部无效；发出去后靠 `comment_count` 增长自证。
 - `replyOperate` 的 `type` 必须是 3、`state` 必须是 1，否则 `code:1000 参数不完整(100)`。
+- `mask` 是敏感词确认开关：`0` = 命中就回 `code:8111`，前端弹框等人工确认；`1` = 不弹确认直接发，命中的词在帖子里显示成星号。设置页「内容安全 → 命中敏感词也照发（星号代替）」(`safety.forceMask`，默认开) 决定发哪个值。
 - `@` 有两种写法：`<kb-contact data-id="uid">` 走好友校验（非好友整条被拒 `code:8112`）；纯文本 `@昵称` 不走校验，任何号都能发。
 - 登录态 = `uid` / `Pauth` / `Uauth` / `nickname` 四个 cookie。
 - 板块列表免登录可读；翻页把上一页的 `cursor` + `last_id` 回传，实测 p1 20 条 → p2 10 条、零重叠。

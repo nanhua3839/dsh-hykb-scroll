@@ -239,6 +239,9 @@ export const DEFAULTS = {
     violence: true,
     blockInbound: true,      // 别人写的内容命中 → 不接话（这条在调模型之前，不消耗 token）
     blockOutbound: true,     // 模型写出来的话命中 → 不发
+    // 平台 mask=1 = 命中敏感词也照发（命中的词在帖子里显示成星号，不弹确认框）。默认开：
+    // 无人值守的机器人没法替人在弹窗上点"确定"，关掉才会退回旧的 mask=0（会停在 8111）。
+    forceMask: true,
     extraWords: [],          // 自己追加的违禁词
     allowWords: [],          // 例外词（游戏里的「屠龙宝刀」这类误伤）
     // 命中后回的那一句话术：固定文本，由程序直接发出去（不叫模型）。

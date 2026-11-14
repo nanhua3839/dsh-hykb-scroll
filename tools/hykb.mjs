@@ -104,7 +104,8 @@ async function cmdReply() {
   const c = loadCred()
   const miss = missingForWrite(c)
   if (miss.length) fail('凭据缺字段：' + miss.join('、'))
-  const j = await replyOperate({ tid: topicId, content: text, type: 3, state: 1 })
+  const mask = config().safety?.forceMask !== false ? 1 : 0
+  const j = await replyOperate({ tid: topicId, content: text, type: 3, state: 1, mask })
   if (j.code !== 100) fail(writeFailText(j.code, j.msg))
   audit({ action: 'reply', topicId, ok: true })
   console.log('✓ ' + j.msg)
@@ -119,7 +120,8 @@ async function cmdComment() {
   const jd = await topicDetail(topicId, { sort: 1 })
   if (jd.code !== 100) fail('拿不到帖子的 fid：' + JSON.stringify(jd).slice(0, 150))
   const fid = jd.result.topic.sid
-  const j = await commentOperate({ fid, replyId: floorId, commentId: 0, content: text })
+  const mask = config().safety?.forceMask !== false ? 1 : 0
+  const j = await commentOperate({ fid, replyId: floorId, commentId: 0, content: text, mask })
   if (j.code !== 100) fail(writeFailText(j.code, j.msg))
   audit({ action: 'comment', topicId, floorId, ok: true })
   console.log('✓ ' + j.msg)

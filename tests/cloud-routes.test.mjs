@@ -129,6 +129,12 @@ test('扫码登录：服务端出二维码，编码不变形', async () => {
   assert.match(r.json.qrDataUrl, /^data:image\/png;base64,/)
 })
 
+test('没选过角色：默认副机，租约上报 secondary（不会去顶在跑的那台）', async () => {
+  const disk = JSON.parse(fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-device.json'), 'utf8'))
+  assert.equal(disk.role, 'secondary', '新设备默认落副机')
+  assert.equal(lastLeaseBody.role, 'secondary', '租约请求带副机，云侧才不会判成抢占')
+})
+
 test('本机角色：主机/副机可选，落盘并随租约上报', async () => {
   const bad = await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'bogus' } })
   assert.equal(bad.code, 400)
@@ -145,6 +151,17 @@ test('本机角色：主机/副机可选，落盘并随租约上报', async () =
   assert.equal(back.json.device.role, 'primary')
   const disk = JSON.parse(fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-device.json'), 'utf8'))
   assert.equal(disk.role, 'primary', '角色要落盘，重启后记得住')
+})
+
+test('关闭：只同步，立刻把租约放掉、之后不再 claim', async () => {
+  const r = await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'off' } })
+  assert.equal(r.code, 200)
+  assert.equal(r.json.device.role, 'off')
+  assert.equal(r.json.lease.mine, false, '关闭后本机不再持有租约')
+  assert.equal(lastLeaseBody.action, 'release', '关闭时先把租约放掉，别占着让别人等过期')
+  assert.equal(leaseOwner, '', '桩里的租约已经空了')
+  const disk = JSON.parse(fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-device.json'), 'utf8'))
+  assert.equal(disk.role, 'off', '关闭要落盘')
 })
 
 test('退出登录：清本地令牌，账号条回到未登录', async () => {

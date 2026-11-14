@@ -683,9 +683,10 @@ async function refuseSend(cfg, c, ev, { log = () => {}, dryRun = false } = {}) {
   const body = target.mention ? '@' + (c.nickname || c.uid) + ' ' + text : text
   let out
   try {
+    const mask = cfg?.safety?.forceMask !== false ? 1 : 0
     out = target.mode === 'comment'
-      ? await commentOperate({ fid: target.fid, replyId: target.replyId, commentId: target.commentId, content: body })
-      : await replyOperate({ tid: target.tid, content: body, replyId: target.replyId, type: 3, state: 1 })
+      ? await commentOperate({ fid: target.fid, replyId: target.replyId, commentId: target.commentId, content: body, mask })
+      : await replyOperate({ tid: target.tid, content: body, replyId: target.replyId, type: 3, state: 1, mask })
   } catch (e) {
     log('  [safety] 固定话术发送被拦：' + e.message)
     return false
@@ -947,10 +948,11 @@ export async function tick(cfg, { dryRun = false, log = console.log } = {}) {
     }
 
     let out
+    const mask = cfg?.safety?.forceMask !== false ? 1 : 0
     if (target.mode === 'comment') {
-      out = await commentOperate({ fid: target.fid, replyId: target.replyId, commentId: target.commentId, content: body })
+      out = await commentOperate({ fid: target.fid, replyId: target.replyId, commentId: target.commentId, content: body, mask })
     } else {
-      out = await replyOperate({ tid: target.tid, content: body, replyId: target.replyId, type: 3, state: 1 })
+      out = await replyOperate({ tid: target.tid, content: body, replyId: target.replyId, type: 3, state: 1, mask })
     }
 
     if (out.code === 100) {

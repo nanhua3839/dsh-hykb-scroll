@@ -33,6 +33,19 @@ export function aiEndpoint(baseUrl) {
 }
 
 /**
+ * 密钥必须是纯 ASCII。设置页把已存的密钥回显成掩码 '••••••••'，前端一旦把它原样 POST 回来，
+ * 拼进 Authorization 会让 fetch 抛 "Cannot convert argument to a ByteString"（报的是字符下标，看不出病因）。
+ * 出网前先查一遍，换成一句人话。
+ * @returns {string} 去掉首尾空白的密钥
+ * @throws 含非 ASCII 字符（多半是掩码被当成真密钥）
+ */
+export function assertAsciiKey(key) {
+  const k = String(key || '').trim()
+  if (/[^\x20-\x7e]/.test(k)) throw new Error('密钥里混进了掩码字符，请在设置页重新填一次')
+  return k
+}
+
+/**
  * 把字符串修成「合法 UTF-16」：孤立代理项一律换成 U+FFFD。
  *
  * 为什么必须有这一层：论坛楼层里全是 emoji，正文按「码元」截断（slice(0,120)）很容易把一对代理项切成一半。
@@ -96,7 +109,7 @@ export async function listModels({ baseUrl, apiKey, timeoutMs = 8000 } = {}) {
   const b = String(baseUrl || '').trim().replace(/\/+$/, '')
   if (!b) throw new Error('先填接口地址')
   aiEndpoint(b)
-  const key = String(apiKey || '').trim()
+  const key = assertAsciiKey(apiKey)
   const ctrl = typeof AbortController === 'function' ? new AbortController() : null
   const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null
   try {
@@ -271,7 +284,7 @@ async function chatOnce(line, messages, { temperature, maxTokens, cfg } = {}) {
 
   const res = await fetch(url, withTimeout({
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + line.apiKey },
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + assertAsciiKey(line.apiKey) },
     body: JSON.stringify(body),
   }))
   const text = await res.text()

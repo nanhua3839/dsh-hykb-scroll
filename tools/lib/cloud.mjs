@@ -40,7 +40,10 @@ export function readDevice() {
   return {
     id: String(raw.id || ''),
     name: String(raw.name || ''),
-    role: raw.role === 'secondary' ? 'secondary' : 'primary',
+    // 只有明确选过主机才算主机：没选过 / 旧文件 / 字段写坏都按副机，
+    // 免得一台新机器默默拿 primary 把正在跑的那台顶下来（云侧只拦「两台都 primary」）。
+    // off = 本机完全不参与运行（不抢租约、不跑监听/刷帖），只保留云同步。
+    role: raw.role === 'primary' ? 'primary' : (raw.role === 'off' ? 'off' : 'secondary'),
   }
 }
 
@@ -51,7 +54,7 @@ export function ensureDevice() {
   const id = (Date.now().toString(16) + Math.random().toString(16).slice(2, 10)).slice(0, 16)
   let name = '本机'
   try { name = os.hostname() || '本机' } catch {}
-  const next = { id, name, role: 'primary' }
+  const next = { id, name, role: 'secondary' }
   try {
     ensureDir(path.dirname(deviceFile()))
     fs.writeFileSync(deviceFile(), JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
@@ -60,10 +63,14 @@ export function ensureDevice() {
   return readDevice()
 }
 
-/** 主机 / 副机：用户选的，跟着这台机器走，不上云（别人的角色跟你无关）。 */
+/** 主机 / 副机 / 关闭：用户选的，跟着这台机器走，不上云（别人的角色跟你无关）。
+ *  primary = 优先跑（可抢占）；secondary = 让位待命（不抢占，主机断了才接管）；
+ *  off = 只同步（连租约都不抢，等于「这台不参与运行」）。
+ *  「取消副机」不等于「我要跑」：缺省一律副机，只有显式选主机才有抢占权。 */
 export function writeDeviceRole(role) {
   const cur = readJson(deviceFile())
-  const next = { ...cur, id: cur.id || ensureDevice().id, name: cur.name || ensureDevice().name, role: role === 'secondary' ? 'secondary' : 'primary' }
+  const picked = role === 'primary' ? 'primary' : (role === 'off' ? 'off' : 'secondary')
+  const next = { ...cur, id: cur.id || ensureDevice().id, name: cur.name || ensureDevice().name, role: picked }
   ensureDir(path.dirname(deviceFile()))
   fs.writeFileSync(deviceFile(), JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
   harden(deviceFile())
