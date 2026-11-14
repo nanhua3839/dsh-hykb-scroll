@@ -8,6 +8,7 @@
 //   4. 租约保证同一时刻只有一个写者，所以 seen/ledger 用整份 blob 同步是安全的。
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import * as C from './config.mjs'
 import * as PR from './profiles.mjs'
 import {
@@ -29,6 +30,45 @@ const accountFile = () => path.join(credDir(), 'plugin-account.json')
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const readJson = (file) => { try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); return isObj(v) ? v : {} } catch { return {} } }
 const canon = (v) => JSON.stringify(v === undefined ? null : v)
+
+/* ───────────── 本机身份（设备 id / 名字 / 主机备机） ───────────── */
+
+const deviceFile = () => path.join(credDir(), 'plugin-device.json')
+
+export function readDevice() {
+  const raw = readJson(deviceFile())
+  return {
+    id: String(raw.id || ''),
+    name: String(raw.name || ''),
+    role: raw.role === 'secondary' ? 'secondary' : 'primary',
+  }
+}
+
+/** 首次调用时生成并落盘；id 一旦定下就不再变（租约靠它认人）。 */
+export function ensureDevice() {
+  const cur = readDevice()
+  if (cur.id) return cur
+  const id = (Date.now().toString(16) + Math.random().toString(16).slice(2, 10)).slice(0, 16)
+  let name = '本机'
+  try { name = os.hostname() || '本机' } catch {}
+  const next = { id, name, role: 'primary' }
+  try {
+    ensureDir(path.dirname(deviceFile()))
+    fs.writeFileSync(deviceFile(), JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
+    harden(deviceFile())
+  } catch {}
+  return readDevice()
+}
+
+/** 主机 / 副机：用户选的，跟着这台机器走，不上云（别人的角色跟你无关）。 */
+export function writeDeviceRole(role) {
+  const cur = readJson(deviceFile())
+  const next = { ...cur, id: cur.id || ensureDevice().id, name: cur.name || ensureDevice().name, role: role === 'secondary' ? 'secondary' : 'primary' }
+  ensureDir(path.dirname(deviceFile()))
+  fs.writeFileSync(deviceFile(), JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
+  harden(deviceFile())
+  return readDevice()
+}
 
 /* ───────────── 本地账号态 ───────────── */
 
@@ -304,7 +344,8 @@ export async function pullAll(since = 0) {
 export async function leaseCall(action, deviceId, deviceName) {
   const a = readAccount()
   if (!a.username || !a.token) throw new Error('还没登录快爆Pro账号')
-  const data = await apiCall('/plugin/lease', { method: 'POST', token: a.token, body: { action, deviceId, deviceName } })
+  const role = readDevice().role
+  const data = await apiCall('/plugin/lease', { method: 'POST', token: a.token, body: { action, deviceId, deviceName, role } })
   return { mine: data.mine === true, holder: isObj(data.holder) ? data.holder : null, ttl: Number(data.ttl) || CLOUD.leaseTtl }
 }
 

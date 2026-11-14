@@ -24,6 +24,7 @@ fs.writeFileSync(path.join(home, '.hykb-ai', 'accounts', '1001', 'credentials.js
 const calls = []
 let stateKv = {}
 let leaseOwner = ''
+let lastLeaseBody = null
 globalThis.fetch = async (url, opt = {}) => {
   const u = new URL(String(url))
   const p = u.pathname.replace(/^.*\/nanhua-api/, '')
@@ -46,6 +47,7 @@ globalThis.fetch = async (url, opt = {}) => {
     return reply({ ok: true, now: Date.now(), kv })
   }
   if (p === '/plugin/lease') {
+    lastLeaseBody = body
     const mine = !leaseOwner || leaseOwner === body.deviceId
     if (mine) leaseOwner = body.action === 'release' ? '' : body.deviceId
     return reply({ ok: true, mine, holder: leaseOwner ? { deviceId: leaseOwner, deviceName: '台式机', until: Date.now() + 90000 } : null, ttl: 90000 })
@@ -125,6 +127,24 @@ test('扫码登录：服务端出二维码，编码不变形', async () => {
   assert.equal(r.code, 200)
   assert.equal(r.json.code, 'a'.repeat(32))
   assert.match(r.json.qrDataUrl, /^data:image\/png;base64,/)
+})
+
+test('本机角色：主机/副机可选，落盘并随租约上报', async () => {
+  const bad = await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'bogus' } })
+  assert.equal(bad.code, 400)
+
+  const r = await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'secondary' } })
+  assert.equal(r.code, 200)
+  assert.equal(r.json.device.role, 'secondary')
+  assert.ok(r.json.device.id && r.json.device.name, '设备要有 id 与名字')
+  assert.equal(lastLeaseBody.role, 'secondary', '切角色后立刻心跳，且租约请求带上新角色')
+  const st = await call('/dsh-hykb/api/cloud')
+  assert.equal(st.json.device.role, 'secondary', 'GET /cloud 也要回本机角色')
+
+  const back = await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'primary' } })
+  assert.equal(back.json.device.role, 'primary')
+  const disk = JSON.parse(fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-device.json'), 'utf8'))
+  assert.equal(disk.role, 'primary', '角色要落盘，重启后记得住')
 })
 
 test('退出登录：清本地令牌，账号条回到未登录', async () => {

@@ -95,3 +95,17 @@ POST /plugin/qr/confirm            (无鉴权) {code, username, password} → {o
 - 打开面板后两种方式并列成 tab：**密码登录/注册** 与 **手机扫码登录**（扫码页展示二维码 + 倒计时 + 「等待手机确认…」）。
 - 已登录：左列用户名 + 两个 pill（同步状态：同步中/刚刚同步/N 分钟前/失败；主备：**主机 · 本机在跑** / **待命 · 另一台在跑**）；右列 **[立即同步]** **[退出登录]**。
 - 视觉只用 `--dsw-alias-*` 与既有刻度（`tests/ui-tokens.test.mjs` 白名单内）。
+## 5. v3 追加：主机 / 副机（用户手动指定优先跑的那台）
+
+**目标**：用户能明确指定哪台优先跑；主机没断时副机只待命；主机断了（90s 租约过期）副机接管。
+
+- 设备身份：`~/.hykb-ai/plugin-device.json` = `{ id, name, role }`，`role` ∈ `"primary"`（主机）/ `"secondary"`（副机），默认 `primary`（等于今天的行为）。
+- `POST /plugin/lease` 增参 `role`，云侧把 `lease_role` 一起存；响应 `holder` 增加 `role` 字段。
+- 抢占规则（云侧）：
+  1. 无有效租约 / 已过期 → 谁抢到算谁的；
+  2. 持有者是本机 → 续租；
+  3. 持有者是别人：**请求方 role=primary 且持有者 role≠primary → 抢占**（对方下次心跳转待命）；否则拒绝并回传 holder。
+  4. 两台都是 primary → 不互相抢占，先到先得（避免来回抢）。
+- 本地新增 **`POST /dsh-hykb/api/cloud/role`** `{role}` → 存本地设备角色 + 立刻心跳一次（抢占即时生效）→ 回 `{ok:true, account, sync, lease, device}`。
+- `GET /dsh-hykb/api/cloud` 增字段 `device: {id, name, role}`。
+- 客户端：账号条（已登录）加一行「本机角色」二选一（主机 / 副机），切换即调 `/cloud/role`；状态 pill 文案：`主机 · 本机在跑` / `主机 · 等另一台停下`（本机是 primary 但被占）/ `待命 · 主机在跑（<名字>）` / `待命 · 副机在跑（<名字>）`。
