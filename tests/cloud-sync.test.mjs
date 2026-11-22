@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import zlib from 'node:zlib'
 
 // paths.mjs / config.mjs 在 import 时就把家目录算好，所以先指到临时目录再动态引入。
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hykb-cloud-'))
@@ -96,4 +97,49 @@ test('账号态：没登录就是没登录，密码太短不发网络请求', as
 
 test('版本不匹配的快照不许落地', async () => {
   await assert.rejects(() => CL.applyPayload({ schemaVersion: 1, kv: {} }), /版本不匹配/)
+})
+
+/* ── 云备份（方案）：收进本地缓存 / 应用 / 墓碑 ── */
+
+const gz = (obj) => zlib.gzipSync(Buffer.from(JSON.stringify(obj), 'utf8')).toString('base64')
+
+test('云备份：远端条目进本地缓存，墓碑删掉它', () => {
+  const payload = { schemaVersion: 2, kv: { 'cfg.ai.model': { v: 'm-cloud', t: 1 } } }
+  const entry = { n: '书房方案', a: 1000, dn: '书房台机', b: 999, z: gz(payload) }
+  CL.ingestAux({ 'backup.b1': { v: entry, t: 1000 } })
+  const list = CL.backupList()
+  assert.equal(list.length, 1)
+  assert.equal(list[0].name, '书房方案')
+  assert.equal(list[0].byName, '书房台机')
+
+  CL.ingestAux({ 'backup.b1': { v: { deleted: true, at: 2000 }, t: 2000 } })
+  assert.deepEqual(CL.backupList(), [])
+})
+
+test('云备份：下载就是把方案里的值写回本地，密钥不动', () => {
+  const payload = { schemaVersion: 2, kv: { 'cfg.ai.model': { v: 'm-restored', t: 1 } } }
+  CL.ingestAux({ 'backup.b2': { v: { n: '要还原的方案', a: 3000, dn: '另一台', b: 1, z: gz(payload) }, t: 3000 } })
+  const r = CL.backupApply('b2')
+  assert.equal(r.name, '要还原的方案')
+  assert.equal(readJson(CFG).ai.model, 'm-restored')
+  assert.equal(fs.readFileSync(path.join(CRED, 'ai-key'), 'utf8').trim(), 'SK-SECRET-AI', '下载方案不该碰密钥文件')
+  assert.throws(() => CL.backupApply('nope'), /本机没有这份方案/)
+})
+
+test('云备份：版本不对的方案拒绝应用', () => {
+  const payload = { schemaVersion: 1, kv: { 'cfg.ai.model': { v: 'x', t: 1 } } }
+  CL.ingestAux({ 'backup.b3': { v: { n: '旧版本', a: 4000, dn: '老机器', b: 1, z: gz(payload) }, t: 4000 } })
+  assert.throws(() => CL.backupApply('b3'), /版本/)
+})
+
+test('下线标记：ack 之后同一个 at 不再生效，新标记仍然生效', () => {
+  const dev0 = CL.readDevice()
+  assert.equal(dev0.offAckAt, 0)
+  CL.ackOffline(5000)
+  assert.equal(CL.readDevice().offAckAt, 5000)
+  CL.ackOffline(4000)                     // 旧的 at 不许把 ack 往回拨
+  assert.equal(CL.readDevice().offAckAt, 5000)
+  const mine = CL.readDevice()
+  // 新装的机器（createdAt 比标记新）不该被历史标记影响：这里用 createdAt 本身做判据
+  assert.ok(mine.createdAt > 0, '设备要记下出生时间，另一台才能判断标记是不是旧的')
 })

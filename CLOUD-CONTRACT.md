@@ -1,12 +1,17 @@
 # 快爆Pro账号 · 多端同步契约（v2，冻结）
 
 > v1 的「整份快照 push/pull」已被 v2 取代：用户要求**自动双向同步 + 主备租约 + 手机扫码登录**。
-> 决策记录：① 只同步配置/人设/凭据，另加已读去重与当日额度（租约要求）；② 允许改 nanhua-api，纯新增端点 + `nh_` 集合；③ 只有快爆上云（含凭据），AI Key / 中转站密钥永不上云；④ 扫码 = 手机相机扫 → 云函数伺服的确认页；⑤ 双向自动，字段级后写覆盖，每 10s；⑥ 租约 90s / 心跳 30s。
+> 决策记录：① 只同步配置/人设/凭据，另加已读去重与当日额度（租约要求）；② 允许改 nanhua-api，纯新增端点 + `nh_` 集合；③ 只有快爆上云（含凭据），AI Key / 中转站密钥永不上云；④ 扫码 = 手机相机扫 → 云函数伺服的确认页；⑤ 双向自动，字段级后写覆盖。
+> **v2.1（降频，2026-11-21）**：⑤⑥ 的节奏改成「每 30 分钟一次合并同步」，⑥ 租约 TTL 90s → 40 分钟。
+> 原因不是设计偏好，是资源点：state 轮询 + 30s 租约心跳 = 一天 1.15 万次调用 ≈ 0.042 点/次 ≈ 500 点/天，
+> 体验版的 3000 点 6 天烧光，额度用尽后整个环境停服（所有路由回 410）。合并端点后一次请求做完推/拉/租约。
 
 ## 0. 面向用户的承诺（验收口径）
 
-- 两台机器同登一个「快爆Pro账号」：A 改任意设置项，B 在 ≤15s 内自动跟随；B 改也一样。
-- 两台都开着：只有一台真正跑（回帖 / 刷帖），另一台界面显示「待命 · 主设备在跑」；主设备 90s 内不再心跳，备机自动接管并开跑。
+- 两台机器同登一个「快爆Pro账号」：A 改任意设置项，B 在**下一轮同步（≤30 分钟）**内自动跟随；B 改也一样。
+  想立刻生效就点「立即同步」，那个不节流。
+- 两台都开着：只有一台真正跑（回帖 / 刷帖），另一台界面显示「待命 · 主设备在跑」；主设备 **40 分钟**内不再同步，
+  备机才自动接管并开跑（TTL 必须大于轮询间隔，否则两次轮询之间租约就过期、两边来回抢）。
 - 登录支持：用户名+密码，或手机扫插件显示的二维码 → 手机浏览器打开确认页 → 登录后点确认 → 插件自动登录。
 
 ## 1. 云侧（`3839lsp模块/backend/functions/nanhua-api/index.js`）
@@ -35,11 +40,12 @@ nh_plugin_state(username, schema_version, kv:[{p,v,t}], lease_owner, lease_devic
 
 ```
 POST /plugin/lease (Bearer) {action:'claim'|'renew'|'release', deviceId, deviceName} 
-  → {ok:true, mine:bool, holder:{deviceId, deviceName, until}|null, ttl:90000}
+  → {ok:true, mine:bool, holder:{deviceId, deviceName, until}|null, ttl:2400000}
   · claim/renew 成功条件：无 lease / until 已过期 / holder.deviceId === deviceId
-  · 成功 → lease={owner:<username>, device:deviceId, deviceName, until: now+90000}
+  · 成功 → lease={owner:<username>, device:deviceId, deviceName, until: now+PLUGIN_LEASE_TTL}
   · release：holder 是自己 → 清空 lease，返回 mine:false
   · 抢不到时 mine:false，holder 原样回传（界面显示「另一台在跑」）
+  · TTL = 40 分钟（`PLUGIN_LEASE_TTL`），必须明显大于插件 30 分钟的同步间隔
 ```
 
 ### 1.3 扫码登录（`nh_plugin_codes`）
@@ -53,6 +59,28 @@ GET  /plugin/link?code=<code>      (无鉴权) → HTML 确认页：说明 + 账
 POST /plugin/qr/confirm            (无鉴权) {code, username, password} → {ok:true} / {ok:false, error}
     · 校验账号密码（同 /login 的 hash 校验）；已封禁账号直接拒绝
 ```
+
+### 1.4 合并同步（v2.1，插件定时轮唯一调用的端点）
+
+```
+POST /plugin/sync (Bearer)
+  { since:<ms>, kv?:[ {p,v,t} ], deviceId, deviceName, role:'primary'|'secondary'|'off' }
+  → { ok:true, now:<ms>, kv:[ {p,v,t} ], applied:<n>, mine:bool, holder:{...}|null, ttl:2400000 }
+    · 一次请求做完三件事：逐键合并 kv（规则同 1.1 POST）、按 1.2 规则续/抢租约、回 t > since 的键
+    · role='off' → 只同步不抢租约；自己握着的先放掉
+    · 不带 deviceId → 只读租约，不改
+    · kv 与租约在同一份文档里，所以只有**一次** update（1.1 POST + 1.2 POST 各一次，合并省掉一半）
+    · 自己刚推上去的键会回显一次，客户端据此把 since 推到最新，下一轮不再重复下发
+    · 合并后整份 kv 的 JSON 长度 >512KB → 400「数据过大」
+```
+
+> 为什么要有这个端点：state 轮询 + 30s 租约心跳是两次调用、两次读库，一天 1.15 万次。
+> 合成一条、30 分钟一轮之后约 **48 次/天**，体验版的 3000 点不再是瓶颈。
+>
+> **错误码**：网关层（`Server: tcbgw`）不返回业务错误码，停服时是 `410 Gone` + 空 body + `Content-Length: 0`，
+> 没有任何专门的字段可读。云侧真正对应的参数在管理接口：`DescribeFunction.AvailableStatus = "InsufficientBalance"`。
+> 插件没有腾讯云凭据，所以按状态码映射：`410 → 资源用尽 · 云端已停服（HTTP 410）`（`cloud.mjs` 的 `explainStatus()`），
+> 401/403/429/5xx 各有对应说法，没见过的码保持「云端返回 N」不猜。
 
 ## 2. 字段路径表（载荷路径 ↔ 本地文件）
 
@@ -82,18 +110,27 @@ POST /plugin/qr/confirm            (无鉴权) {code, username, password} → {o
 | POST | `/dsh-hykb/api/cloud/qr/start` | `{}` | `{ok:true, code, expiresAt, url, qrDataUrl}`（`qrcode` 包现成依赖，服务端生成 PNG data URL） |
 | POST | `/dsh-hykb/api/cloud/qr/poll` | `{code}` | `{ok:true, status, account?}`（ok 时服务端已落令牌） |
 | POST | `/dsh-hykb/api/cloud/sync` | `{direction:'push'\|'pull'}` | `{ok:true, summary}`（手动立即同步，仍保留） |
+| GET | `/dsh-hykb/api/cloud/backup` | — | `{ok:true, loggedIn, backups:[{id,name,at,byName,bytes}]}`（本地缓存，不发网络请求） |
+| POST | `/dsh-hykb/api/cloud/backup/save` | `{name?}` | `{ok:true, backup:{id,name}, backups}`（上传当前方案；超 8 份 / 超 200KB 回 400） |
+| POST | `/dsh-hykb/api/cloud/backup/refresh` | `{}` | `{ok:true, backups}`（读 `GET /plugin/state?since=0`，只收 `backup.*` / `sys.offline`，不动本机配置） |
+| POST | `/dsh-hykb/api/cloud/backup/apply` | `{id}` | `{ok:true, name, applied, summary, backups}`（覆盖本机设置 / 人设，然后立刻对一次账） |
+| POST | `/dsh-hykb/api/cloud/backup/delete` | `{id}` | `{ok:true, backups}`（写墓碑） |
+| POST | `/dsh-hykb/api/cloud/offline` | `{scope:'device'\|'both'}` | `{ok:true, scope, note, account, sync, lease, device}`（本机转 off；both 另写 `sys.offline`） |
 
 后台循环（**浏览器关掉也照跑**）：
-- 同步：每 10s reconcile 一次 —— 本地快照 diff → POST 变更；GET `?since` → 应用远端 → 前进 since。写盘后刷新 baseline 防回环。
-- 租约：每 30s claim/renew；拿到租约才允许 sched（回帖监听 / 刷帖时钟）运行；失去租约 → 先 stop 再待命，运行日志记一条切换。
-- 备机手动操作（`/dsh-hykb/api/listen`、`/browse` 的 run、`/followback` 的 run）一律拒绝：`{ok:false, error:'这台在待命，主设备正在跑（切主备请等 90s）'}`。
+- 同步 + 租约：每 **30 分钟** 一次 `syncRound()` —— 一次 `POST /plugin/sync` 同时做完「本地快照 diff 推上去 /
+  `since` 拉远端并应用 / 续抢租约」。只有拿到租约才允许 sched（回帖监听 / 刷帖时钟）运行；失去租约 → 先 stop 再待命，运行日志记一条切换。
+- 只有一个定时器。原来那条 30 秒的租约心跳已去掉（租约随合并同步走），`heartbeat()` 只剩「改角色 / 退出登录」手动触发。
+- 「立即同步」不节流：`POST /dsh-hykb/api/cloud/sync {direction:'push'}` 直接跑一次同一个 `reconcile()`。
+- 备机手动操作（`/dsh-hykb/api/listen`、`/browse` 的 run、`/followback` 的 run）一律拒绝：`{ok:false, error:'这台在待命，主设备正在跑（切主备请等 40 分钟）'}`。
 
 ## 4. 客户端（`dsh-hykb-scroll/lib/client.js`）
 
-账号条（整页第一块）：
-- 未登录：左列 **登录快爆Pro账号** / 优势文案（云端同步：设置、人设、AI 线路与快爆登录态，换台电脑登录一次就全回来）/ 小字 **此账号与快爆官方无关**；右列 **[注册]** **[登录]**。
-- 打开面板后两种方式并列成 tab：**密码登录/注册** 与 **手机扫码登录**（扫码页展示二维码 + 倒计时 + 「等待手机确认…」）。
-- 已登录：左列用户名 + 两个 pill（同步状态：同步中/刚刚同步/N 分钟前/失败；主备：**主机 · 本机在跑** / **待命 · 另一台在跑**）；右列 **[立即同步]** **[退出登录]**。
+账号条（整页第一块）—— v4 起是「账号 · 云同步 · 云备份」一个可展开区域，细节见 §7：
+- 未登录（默认展开）：标题 **快爆Pro账号 · 未登录** / 优势文案（云端同步 + 云备份：设置、人设、AI 线路与快爆登录态，换台电脑登录一次就全回来）/ 小字 **此账号与快爆官方无关**。
+  展开后账号段给 **[注册]** **[登录]**；两种方式并列成 tab：**密码登录/注册** 与 **手机扫码登录**（二维码 + 倒计时 + 「等待手机确认…」）。
+- 已登录（默认收起）：一行摘要 = 用户名 + 两个 pill（同步状态：同步中/刚刚同步/N 分钟前/失败；主备：**主机 · 本机在跑** / **待命 · 另一台在跑** / **已关闭 · 只同步**）+ 右侧 **[管理账号与云]**。
+  展开后分三段：账号（退出登录）、云同步（本机角色三选一 / 立即同步 / 状态说明）、云备份（上传方案 / 清单 / 下载方案 / 删除）。
 - 视觉只用 `--dsw-alias-*` 与既有刻度（`tests/ui-tokens.test.mjs` 白名单内）。
 ## 5. v3 追加：主机 / 副机 / 关闭（用户手动指定哪台跑）
 
@@ -110,7 +147,8 @@ POST /plugin/qr/confirm            (无鉴权) {code, username, password} → {o
 
 ### 5.1 三种角色
 
-- 设备身份：`~/.hykb-ai/plugin-device.json` = `{ id, name, role }`，`role` ∈ `"primary"`（主机）/ `"secondary"`（副机）/ `"off"`（关闭），默认 **`secondary`**。
+- 设备身份：`~/.hykb-ai/plugin-device.json` = `{ id, name, role, createdAt, offAckAt }`，`role` ∈ `"primary"`（主机）/ `"secondary"`（副机）/ `"off"`（关闭），默认 **`secondary`**。
+  `createdAt` = 这台机器开始用插件的时刻；`offAckAt` = 已经消费过的 `sys.offline` 标记时间（见 §6.3）。
 - `off` 的行为：**不发 claim**（心跳里直接返回），若正持有则先 `release`，然后转待命；云同步照常，运行相关的自动动作全停。云侧不需要认识 `off`（它只会收到 `release`）。
   - 为什么不是 `primary`：两态互斥且「取消副机」只能落成另一态，默认 `primary` 会让一台**没选过角色**的机器悄悄拿到抢占权，把正在跑的那台顶下来（云侧 §5.4 只拦「两台都 primary」，拦不住「一台 primary 对一台 secondary/空」）。缺省副机后，没选过角色的机器只待命，主机断了才接管（§5.1 仍然成立）。
   - 「取消副机」不等于「我要跑」：只有用户显式点「主机」才写 `primary`，且客户端切换前确认。
@@ -124,3 +162,70 @@ POST /plugin/qr/confirm            (无鉴权) {code, username, password} → {o
 - `GET /dsh-hykb/api/cloud` 增字段 `device: {id, name, role}`。
 - `/cloud/role` 接受 `primary` / `secondary` / `off` 三值。
 - 客户端：账号条（已登录）加一行「本机角色」三选一（主机 / 副机 / 关闭），切换即调 `/cloud/role`；切「主机」和「关闭」前都要二次确认（不会自动改）。状态 pill 文案：`主机 · 本机在跑` / `主机 · 等另一台停下`（本机是 primary 但被占）/ `接管中 · 本机在跑`（本机是副机却在跑）/ `待命 · 主机在跑（<名字>）` / `待命 · 副机在跑（<名字>）` / `已关闭 · 只同步`。角色行下面再跟一行随状态变的说明，讲清当前状态意味着什么。
+
+## 6. v4 追加：云备份（方案）
+
+**目标**：用户要的是「把当前这套设置存到云端，换台机器登录同一个账号后自己决定要不要下载回来」，
+同时它也是一份**备份**（改坏了能退回去）。
+
+### 6.0 为什么不新开一个云端点
+
+云函数的代码不在本仓库（`3839lsp模块/backend/functions/nanhua-api/index.js`），加端点就要发版、要碰生产。
+而 `nh_plugin_state` 本来就是「路径 → 值」的 KV，**现有端点就能存任意路径**，所以方案直接住在同一份文档里：
+
+```
+POST /plugin/state  { kv:[ { p:'backup.<id>', v:{ n,a,d,dn,b,z }, t:<at> } ] }
+GET  /plugin/state?since=0  → 同一个 kv 数组（客户端只挑 backup.* / sys.*）
+```
+
+- `backup.<id>` 的值是**压缩后的整份快照**：`{ n:名字, a:时间, d:设备id, dn:设备名, b:原文字节数, z:gzip+base64(JSON) }`。
+- 为什么压缩：kv 与租约同一个文档、整份 JSON 上限 512KB；配置 + 人设不压缩时几十 KB，压完通常只占几 KB。
+- 为什么删除要写墓碑：云侧合并规则只有「t 大者覆盖」，**没有删除**；所以删除 = 写 `{deleted:true, at}` 覆盖旧值。
+- 单份上限 200KB（按**上云后的条目体积**算，gzip + base64 之后），所有方案合计上限 380KB（给实时同步的 KV 留余量），最多 8 份；
+  超出在客户端直接拒绝，不会悄悄截断。
+- 谁上传：`pushKv()`（`POST /plugin/state`），不碰租约、不改 `syncRound` 的基线。
+- 谁看到：另一台下一轮合并同步会收到 `backup.*` 条目 → `ingestAux()` 收进本地缓存 `~/.hykb-ai/cloud-backups.json`。
+
+### 6.1 载荷内容
+
+`backupPayload()` = `snapshot()` 去掉三类：
+
+| 去掉的 | 理由 |
+|---|---|
+| `seen.*` / `ledger.*` | 又大又只对本机有意义（去重 / 当日额度） |
+| `acct.*.cred` | 快爆登录态：换机器本来就该重新扫码 |
+| 密钥文件 | 本来就不在 snapshot 里（`ai-key` / `judge-key` / `relay-keys.json` / `maskword-key` 都是独立文件） |
+
+### 6.2 下载（应用）
+
+`backupApply(id)`：`applyKV(payload.kv)` —— 只写配置叶子、人设、账号备注、`meta.ptr`，
+本地密钥与没被点到的内容一个字节都不动。下载后宿主把 `cloudEngine.baseline` 设成**覆盖之前**的快照，
+这样恢复出来的差异会作为「本机改动」在下一次对账里推上去，而不是被首次同步的「云端为准」逻辑又盖回来。
+
+### 6.3 下线（副机确认的落地）
+
+`POST /dsh-hykb/api/cloud/offline {scope}`：
+
+- `scope=device`：本机 `role=off` + 心跳（关掉时先 `release` 租约）。
+- `scope=both`：同上，再 `POST /plugin/state` 写一条 `sys.offline = { at, by, byName, scope:'all' }`。
+- 对端在合并同步的 `round.offline` 里读到标记 → `cloudEngine.honorOffline()`：
+  **只认 `at > max(offAckAt, createdAt)` 的标记**（新装的机器不会被历史标记关掉），生效后写 `offAckAt=at`
+  （同一个标记只生效一次），本机转 `off` 并释放租约。
+
+## 7. v4 追加：客户端交互（账号 · 云同步 · 云备份 合成一块）
+
+顶部那块是**一个可展开的区域**：
+
+| 状态 | 收起时 | 展开后 |
+|---|---|---|
+| 未登录 | 标题「快爆Pro账号 · 未登录」+ 优势文案 + [展开] | 账号（注册 / 登录 / 扫码）、云同步（未登录提示）、云备份（未登录提示） |
+| 已登录 | 账号名 + 同步 pill + 主备 pill + [管理账号与云] | 账号（退出登录）、云同步（本机角色三选一 / 立即同步 / 状态说明）、云备份（上传方案 / 清单 / 下载 / 删除） |
+
+副机确认（`isSecondary` = 已登录且 `device.role === 'secondary'`）：
+
+- 任意开关改动（`Sw` 组件）与模式卡（除「先关着」）→ `askSwitch`：
+  「已开启云同步功能，当前改动是否需进行同步？」[不同步] [同步]。
+  「同步」= 存盘 + `POST /cloud/sync {direction:'push'}`；「不同步」= 只存本机。
+- 「先关着」/ 云同步里的「关闭」→ `askOffline`：
+  「已开启云同步功能，双设备启用时无需关闭。请问是否关闭？」[下线该设备] [下线双端设备]。
+- 弹窗是自绘的（`AskDialog`），点遮罩 / Esc = 取消；主机与未登录不弹。

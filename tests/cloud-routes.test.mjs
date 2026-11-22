@@ -25,6 +25,7 @@ const calls = []
 let stateKv = {}
 let leaseOwner = ''
 let lastLeaseBody = null
+let lastSyncBody = null
 globalThis.fetch = async (url, opt = {}) => {
   const u = new URL(String(url))
   const p = u.pathname.replace(/^.*\/nanhua-api/, '')
@@ -32,6 +33,23 @@ globalThis.fetch = async (url, opt = {}) => {
   calls.push({ path: p + (u.search || ''), method: opt.method || 'GET' })
   const reply = (obj) => ({ ok: true, status: 200, json: async () => obj })
   if (p === '/login') return reply({ ok: true, username: 'probe_user', token: 'tok-1' })
+  // 合并端点（§1.4）：一次做完推 / 拉 / 租约
+  if (p === '/plugin/sync') {
+    lastSyncBody = body
+    let applied = 0
+    for (const cell of (body.kv || [])) {
+      if (!stateKv[cell.p] || Number(cell.t) > Number(stateKv[cell.p].t)) { stateKv[cell.p] = cell; applied += 1 }
+    }
+    const now = Date.now()
+    let mine = false
+    if (!leaseOwner || leaseOwner === body.deviceId) {
+      if (body.role !== 'off' && body.deviceId) { leaseOwner = body.deviceId; mine = true }
+    } else if (body.role === 'primary') { leaseOwner = body.deviceId; mine = true }
+    const since = Number(body.since || 0)
+    const kv = []
+    for (const cell of Object.values(stateKv)) if (!since || Number(cell.t) > since) kv.push(cell)
+    return reply({ ok: true, now, kv, applied, mine, holder: leaseOwner ? { deviceId: leaseOwner, deviceName: '台式机', until: now + 2400000 } : null, ttl: 2400000 })
+  }
   if (p === '/plugin/state' && (opt.method || 'GET') === 'POST') {
     // 云侧存 kv 用条目数组（字段名不能带点）
     let applied = 0
@@ -104,8 +122,8 @@ test('手动同步 push：把本地配置推到云端，且不推密钥', async 
   const r = await call('/dsh-hykb/api/cloud/sync', { method: 'POST', body: { direction: 'push' } })
   assert.equal(r.code, 200)
   assert.match(r.json.summary, /已上传/)
-  const pushed = calls.filter((c) => c.path === '/plugin/state' && c.method === 'POST')
-  assert.ok(pushed.length >= 1)
+  const pushed = calls.filter((c) => c.path === '/plugin/sync' && c.method === 'POST')
+  assert.ok(pushed.length >= 1, '走合并端点 /plugin/sync')
   assert.equal(JSON.stringify(stateKv).includes('SK-MUST-NOT-LEAVE'), false, '密钥不许上云')
   assert.equal(Object.keys(stateKv).some((k) => k === 'cfg.listen.enabled'), true)
 })
@@ -132,7 +150,13 @@ test('扫码登录：服务端出二维码，编码不变形', async () => {
 test('没选过角色：默认副机，租约上报 secondary（不会去顶在跑的那台）', async () => {
   const disk = JSON.parse(fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-device.json'), 'utf8'))
   assert.equal(disk.role, 'secondary', '新设备默认落副机')
-  assert.equal(lastLeaseBody.role, 'secondary', '租约请求带副机，云侧才不会判成抢占')
+  assert.equal(lastSyncBody.role, 'secondary', '合并同步里带副机角色，云侧才不会判成抢占')
+})
+
+test('轮询节奏：30 分钟一次，租约 TTL 40 分钟', async () => {
+  const { CLOUD } = await import('../tools/lib/cloud.mjs')
+  assert.equal(CLOUD.syncMs, 30 * 60 * 1000, '定时轮 30 分钟')
+  assert.equal(CLOUD.leaseTtl, 40 * 60 * 1000, '租约 TTL 要大于轮询间隔')
 })
 
 test('本机角色：主机/副机可选，落盘并随租约上报', async () => {
@@ -162,6 +186,76 @@ test('关闭：只同步，立刻把租约放掉、之后不再 claim', async ()
   assert.equal(leaseOwner, '', '桩里的租约已经空了')
   const disk = JSON.parse(fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-device.json'), 'utf8'))
   assert.equal(disk.role, 'off', '关闭要落盘')
+})
+
+/* ───────────────── 云备份（方案）与下线 ───────────────── */
+
+test('云备份：上传当前方案 → 云端能列出来 → 下载覆盖本机 → 删除留墓碑', async () => {
+  // 先回到副机（上一组测试把本机关掉了）
+  await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'secondary' } })
+
+  const up = await call('/dsh-hykb/api/cloud/backup/save', { method: 'POST', body: { name: '回归方案' } })
+  assert.equal(up.code, 200, JSON.stringify(up.json))
+  assert.equal(up.json.backups.length, 1)
+  assert.equal(up.json.backups[0].name, '回归方案')
+  assert.ok(Object.keys(stateKv).some((k) => k.startsWith('backup.')), '方案要写进同一份云端 KV')
+
+  const list = await call('/dsh-hykb/api/cloud/backup')
+  assert.equal(list.json.backups.length, 1, '换台机器登录后也能看到同一份清单')
+
+  // 本机把设置改乱，再用方案盖回来
+  const cfg0 = JSON.parse(fs.readFileSync(CFG, 'utf8'))
+  cfg0.listen = { ...(cfg0.listen || {}), enabled: false }
+  fs.writeFileSync(CFG, JSON.stringify(cfg0, null, 2))
+  const ap = await call('/dsh-hykb/api/cloud/backup/apply', { method: 'POST', body: { id: list.json.backups[0].id } })
+  assert.equal(ap.code, 200, JSON.stringify(ap.json))
+  assert.equal(JSON.parse(fs.readFileSync(CFG, 'utf8')).listen.enabled, true, '方案里的值要回到本机')
+
+  const del = await call('/dsh-hykb/api/cloud/backup/delete', { method: 'POST', body: { id: list.json.backups[0].id } })
+  assert.equal(del.code, 200)
+  assert.equal(del.json.backups.length, 0)
+  const tomb = Object.values(stateKv).find((c) => String(c.p).startsWith('backup.'))
+  assert.equal(tomb.v.deleted, true, '删除用墓碑，云侧只做后写覆盖')
+})
+
+test('没登录：上传方案被拒，不会静默丢东西', async () => {
+  const saved = fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-account.json'), 'utf8')
+  fs.rmSync(path.join(home, '.hykb-ai', 'plugin-account.json'), { force: true })
+  try {
+    const r = await call('/dsh-hykb/api/cloud/backup/save', { method: 'POST', body: { name: 'x' } })
+    assert.equal(r.code, 400)
+    assert.match(String(r.json.error), /登录/)
+  } finally {
+    fs.writeFileSync(path.join(home, '.hykb-ai', 'plugin-account.json'), saved)
+  }
+})
+
+test('下线该设备：本机转关闭，不写云端标记', async () => {
+  await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'secondary' } })
+  const r = await call('/dsh-hykb/api/cloud/offline', { method: 'POST', body: { scope: 'device' } })
+  assert.equal(r.code, 200, JSON.stringify(r.json))
+  assert.equal(r.json.device.role, 'off')
+  assert.equal(r.json.lease.mine, false, '下线要先把租约放掉')
+  assert.equal(stateKv['sys.offline'], undefined, '只下线本机时不写双端标记')
+})
+
+test('下线双端设备：云端留标记，另一台下一次同步读到也转关闭', async () => {
+  await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'secondary' } })
+  const r = await call('/dsh-hykb/api/cloud/offline', { method: 'POST', body: { scope: 'both' } })
+  assert.equal(r.code, 200, JSON.stringify(r.json))
+  assert.equal(r.json.device.role, 'off')
+  assert.ok(stateKv['sys.offline'], '双端下线要在云端留一个标记')
+  const dev = JSON.parse(fs.readFileSync(path.join(home, '.hykb-ai', 'plugin-device.json'), 'utf8'))
+  assert.ok(dev.offAckAt > 0, '自己写的标记要 ack 掉，别把自己再关一次')
+
+  // 模拟对端：把本机角色改回副机，再放一个更新的下线标记，然后同步一轮
+  await call('/dsh-hykb/api/cloud/role', { method: 'POST', body: { role: 'secondary' } })
+  const at = Date.now() + 5000
+  stateKv['sys.offline'] = { p: 'sys.offline', v: { at, by: 'other-dev', byName: '书房台机', scope: 'all' }, t: at }
+  const sync = await call('/dsh-hykb/api/cloud/sync', { method: 'POST', body: { direction: 'push' } })
+  assert.equal(sync.code, 200, JSON.stringify(sync.json))
+  const st = await call('/dsh-hykb/api/cloud')
+  assert.equal(st.json.device.role, 'off', '读到对端标记后本机也要转关闭')
 })
 
 test('退出登录：清本地令牌，账号条回到未登录', async () => {

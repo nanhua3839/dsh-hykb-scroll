@@ -134,7 +134,7 @@ test('整页能渲染：卡片序号连续、无 undefined / NaN 漏进文本', 
   const cards = collect(tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className === 'hks-card')
   assert.ok(cards.length >= 6, '卡片数不对：' + cards.length)
   const nos = collect(tree, (n) => n.props && n.props.className === 'hks-no').map((n) => texts(n).join(''))
-  assert.deepEqual(nos, ['1', '2', '3', '4', '5', '6', '7', '8'])
+  assert.deepEqual(nos, ['1', '2', '3', '4', '5', '6', '7', '8', '9'])
 })
 
 test('必做步骤缺一项时状态条会标红', async () => {
@@ -166,6 +166,23 @@ test('收尾只有保存状态、没有保存按钮（改动仍会自动保存�
   const rows = collect(tree, (n) => n.props && n.props.className === 'hks-saverow')
   assert.equal(rows.length, 1, '应该有一行保存状态')
   assert.match(texts(rows[0]).join(''), /自动保存/, '仍要说明改动会自动存')
+})
+
+test('账号 / 云同步 / 云备份 合成一块：未登录也看得见三个入口', async () => {
+  const D = await defaults()
+  const status = { ok: true, credentials: { present: false }, aiReady: false, traffic: { readHour: 0, readDay: 0, writeHour: 0, writeDay: 0 }, listen: { running: false }, browse: { enabled: false, hasSession: false } }
+  const { mod, React } = await loadClient({ 0: D, 1: status })
+  React.__reset()
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
+  const all = texts(tree).join(' ')
+
+  // 一个区域：账号 + 云同步 + 云备份（用户要求合并，不许再拆成两块）
+  const bars = collect(tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className.includes('hks-acctbar'))
+  assert.equal(bars.length, 1, '账号区域应该只有一块')
+  for (const t of ['快爆Pro账号', '云同步', '云备份', '登录后才能选本机角色、手动同步。', '登录后才能上传 / 下载方案。']) {
+    assert.ok(all.includes(t), '缺少：' + t)
+  }
+  assert.ok(!/undefined|NaN|\[object Object\]/.test(all), '文本里漏出了脏值')
 })
 
 test('点一下开关就自动 POST 配置，不用再点保存', async () => {
