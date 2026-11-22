@@ -299,3 +299,27 @@ test('打开游戏评价后才展开榜单 / 清单 / 试读按钮', async () =>
   }
   assert.ok(!/undefined|NaN/.test(all), '展开后漏出了 undefined / NaN')
 })
+
+test('互动卡：主动 / 被动 / 名单 三段都在，只有「发帖」是只读的', async () => {
+  const D = await defaults()
+  const status = { ok: true, credentials: { present: true, uid: '1', nickname: 'n', hasPauth: true }, aiReady: true, traffic: { readHour: 0, readDay: 0, writeHour: 0, writeDay: 0 }, listen: { running: false }, browse: { enabled: true, hasSession: true } }
+  const { mod, React } = await loadClient({ 0: D, 1: status })
+  React.__reset()
+  const tree = expand(React.createElement(mod.HykbScrollSection, {}))
+  const card = collect(tree, (n) => n.props && n.props.className === 'hks-card' && n.props['data-hks-sec'] === 'interaction')[0]
+  assert.ok(card, '互动卡没渲染出来')
+
+  const all = texts(card).join(' ')
+  for (const s of ['主动', '发帖', '发回帖', '遇到有价值内容时@你', '场景：发日报', '被动互动', '在帖子下互动', '在楼中楼里互动', '互动需@', '创作内容', '内容类型', '名单', '论坛', '账号']) {
+    assert.ok(all.includes(s), '互动卡缺一行：' + s)
+  }
+  for (const bad of ['undefined', 'NaN', '[object Object]']) {
+    assert.ok(!all.includes(bad), '互动卡文本里漏出了 ' + bad)
+  }
+
+  // 六颗开关：发帖只读，其余可点
+  const sws = collect(card, (n) => n.props && n.props.className === 'hks-sw')
+  assert.ok(sws.length >= 6, '开关数量不对：' + sws.length)
+  assert.equal(sws.filter((n) => n.props.disabled === true).length, 1, '只有「发帖」该是只读的')
+})
+
